@@ -1,0 +1,4 @@
+# 手元・CI・Dockerfile で同じバージョンを使う（clippy の lint がバージョンで変わるため）
+[toolchain]
+channel = "1.90"
+components = ["rustfmt", "clippy"]

@@ -2,7 +2,6 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use axum::body::Body;
 use axum::extract::{FromRequest, FromRequestParts, RawPathParams, Request};
 use axum::http::request::Parts;
 use axum::http::{HeaderValue, StatusCode, header};
@@ -66,8 +65,9 @@ where
     type Rejection = AppError;
 
     async fn from_request(req: Request, _: &S) -> Result<Self, Self::Rejection> {
-        let bytes =
-            read_body(req.into_body(), MAX_BODY_BYTES).await.map_err(|_| too_large("リクエストが大きすぎます"))?;
+        let bytes = axum::body::to_bytes(req.into_body(), MAX_BODY_BYTES)
+            .await
+            .map_err(|_| too_large("リクエストが大きすぎます"))?;
         decode_json(&bytes).map(Json)
     }
 }
@@ -125,11 +125,6 @@ impl<'de> serde::Deserialize<'de> for RawNum {
             other => Err(serde::de::Error::custom(format!("invalid number {other}"))),
         }
     }
-}
-
-/// ボディを上限まで読む。上限を超えたら Err。
-pub async fn read_body(body: Body, limit: usize) -> Result<axum::body::Bytes, ()> {
-    axum::body::to_bytes(body, limit).await.map_err(|_| ())
 }
 
 /// パスパラメーターを正の整数として取り出す。正しくなければ 404。
