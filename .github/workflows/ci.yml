@@ -91,6 +91,58 @@ jobs:
       - name: 統合テスト（DB を使うテスト）
         run: go test -race ./...
 
+  api-rs:
+    name: API (Rust)
+    runs-on: ubuntu-latest
+    services:
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: root
+          MYSQL_DATABASE: fpanda
+          TZ: Asia/Tokyo
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -uroot -proot --silent"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=20
+    env:
+      DB_HOST: 127.0.0.1
+      DB_PORT: "3306"
+      DB_USER: root
+      DB_PASSWORD: root
+      DB_NAME: fpanda
+      # 統合テストはテストごとに DB を作成するため root で接続する
+      TEST_DB_HOST: 127.0.0.1
+      TEST_DB_PORT: "3306"
+      TEST_DB_USER: root
+      TEST_DB_PASSWORD: root
+    defaults:
+      run:
+        working-directory: api-rs
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: api-rs
+      - name: cargo fmt
+        run: cargo fmt --check
+      - name: cargo clippy
+        run: cargo clippy --all-targets --locked -- -D warnings
+      - name: migrate up
+        run: cargo run --locked --bin migrate up
+      - name: migrate status
+        run: |
+          cargo run --locked --bin migrate status | tee /tmp/status.log
+          if grep -q "^pending" /tmp/status.log; then exit 1; fi
+      - name: テスト（単体・DB を使う統合テスト）
+        run: cargo test --locked
+
   web:
     name: Web (React)
     runs-on: ubuntu-latest
