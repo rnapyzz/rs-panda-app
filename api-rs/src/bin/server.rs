@@ -7,7 +7,7 @@ use fpanda_api::auth::oidc::Oidc;
 use fpanda_api::auth::{AuthService, ROLE_FPA_ADMIN};
 use fpanda_api::config::Config;
 use fpanda_api::state::Inner;
-use fpanda_api::{AppState, db, server};
+use fpanda_api::{AppState, db, notify, orgchange, server};
 
 #[tokio::main]
 async fn main() {
@@ -31,16 +31,27 @@ async fn run() -> anyhow::Result<()> {
         tracing::info!(issuer = cfg.oidc.issuer, allowed_domains = ?cfg.oidc.allowed_domains, "sso enabled");
         Some(Oidc::new(cfg.oidc.clone()))
     };
+    let notify = notify::Service::new(
+        pool.clone(),
+        notify::Options {
+            slack_webhook_url: cfg.slack_webhook_url.clone(),
+            base_url: cfg.app_base_url.clone(),
+            now: None,
+        },
+    );
     let state = AppState::new(Inner {
         db: pool.clone(),
         auth,
         cookie_secure: cfg.cookie_secure,
         trust_proxy: cfg.trust_proxy,
         oidc,
-        notifier: None,
+        notify: notify.clone(),
     });
 
     tokio::spawn(cleanup_sessions(state.clone()));
+    // 締切の通知と組織変更の予約の適用は、1分ごとに確かめる
+    tokio::spawn(notify.run());
+    tokio::spawn(orgchange::run(pool.clone()));
 
     let addr = cfg.listen_addr();
     let listener = tokio::net::TcpListener::bind(&addr).await?;

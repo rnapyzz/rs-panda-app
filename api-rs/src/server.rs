@@ -13,7 +13,7 @@ use futures::FutureExt;
 use mysql_async::prelude::*;
 
 use crate::error::{AppError, internal_error_response, not_found};
-use crate::{AppState, activity, actual, auth, csvio, http, master, report, scenario};
+use crate::{AppState, activity, actual, auth, csvio, history, http, master, notify, orgchange, report, scenario};
 
 /// API 全体のルーター。
 pub fn router(state: AppState) -> Router {
@@ -29,7 +29,10 @@ pub fn router(state: AppState) -> Router {
         .merge(activity::routes())
         .merge(scenario::routes())
         .merge(actual::routes())
-        .merge(report::routes());
+        .merge(report::routes())
+        .merge(notify::routes())
+        .merge(orgchange::routes())
+        .merge(history::routes());
 
     api
         // 未定義の /api パス（メソッドの違いを含む）は JSON で 404 を返す

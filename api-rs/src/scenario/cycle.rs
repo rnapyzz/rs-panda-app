@@ -307,8 +307,8 @@ async fn finish_cycle(
     }
     tx.commit().await?;
     // 7. 締切があれば「更新の開始」を送る
-    if let (Some(n), true) = (&st.notifier, deadline) {
-        n.update_started(id).await;
+    if deadline {
+        st.notify.update_started(id).await;
     }
     Ok(http::json(StatusCode::CREATED, &res))
 }
