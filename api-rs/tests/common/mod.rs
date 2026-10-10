@@ -276,3 +276,88 @@ pub fn row_errors(body: &Value) -> Vec<String> {
         .map(|rows| rows.iter().map(|r| format!("{}:{}", r["line"], r["message"].as_str().unwrap_or(""))).collect())
         .unwrap_or_default()
 }
+
+/// 施策のテストに使うユニットとユーザー（Go 版の activityFixture）。
+/// unit1 の担当は manager1、unit2 の担当は manager2。
+pub struct ActivityFixture {
+    pub env: TestEnv,
+    pub admin: Client,
+    pub unit1: i64,
+    pub unit2: i64,
+    pub manager1_id: i64,
+    pub member_id: i64,
+    pub manager1: Client,
+    pub manager2: Client,
+    pub member: Client,
+    pub member2: Client,
+    pub viewer: Client,
+}
+
+impl ActivityFixture {
+    pub async fn new() -> Option<ActivityFixture> {
+        let (admin, env) = TestEnv::admin_client().await?;
+        let manager1_id = env.create_user("manager1@example.com", "manager").await;
+        let manager2_id = env.create_user("manager2@example.com", "manager").await;
+        let member_id = env.create_user("member@example.com", "member").await;
+        env.create_user("member2@example.com", "member").await;
+        env.create_user("viewer@example.com", "viewer").await;
+
+        let seg = admin.must_create("/api/segments", json!({"name": "XXX事業"})).await;
+        let org = admin.must_create("/api/organizations", json!({"name": "BBB部"})).await;
+        let unit1 = admin
+            .must_create(
+                "/api/units",
+                json!({"name": "CCC課", "segment_id": seg, "organization_id": org, "owner_user_id": manager1_id}),
+            )
+            .await;
+        let unit2 = admin
+            .must_create(
+                "/api/units",
+                json!({"name": "DDD課", "segment_id": seg, "organization_id": org, "owner_user_id": manager2_id}),
+            )
+            .await;
+
+        let login = |email: &'static str| {
+            let c = env.client();
+            async move {
+                c.login(email).await;
+                c
+            }
+        };
+        let manager1 = login("manager1@example.com").await;
+        let manager2 = login("manager2@example.com").await;
+        let member = login("member@example.com").await;
+        let member2 = login("member2@example.com").await;
+        let viewer = login("viewer@example.com").await;
+        Some(ActivityFixture {
+            env,
+            admin,
+            unit1,
+            unit2,
+            manager1_id,
+            member_id,
+            manager1,
+            manager2,
+            member,
+            member2,
+            viewer,
+        })
+    }
+}
+
+/// 施策の作成・更新リクエストを作る。overrides で項目を上書きする。
+pub fn activity_body(unit: i64, code: &str, overrides: Value) -> Value {
+    let mut b = json!({
+        "unit_id": unit,
+        "code": code,
+        "name": format!("施策 {code}"),
+        "activity_type": "recurring",
+        "status": "in_progress",
+    });
+    if let Value::Object(o) = overrides {
+        for (k, v) in o {
+            b[k] = v;
+        }
+    }
+    b
+}

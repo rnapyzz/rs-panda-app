@@ -3,12 +3,15 @@
 #[macro_use]
 pub mod db;
 
+pub mod activity;
 pub mod audit;
 pub mod auth;
+pub mod calc;
 pub mod codes;
 pub mod config;
 pub mod csvio;
 pub mod error;
+pub mod formula;
 pub mod http;
 pub mod jst;
 pub mod master;

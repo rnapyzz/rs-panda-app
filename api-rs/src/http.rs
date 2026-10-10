@@ -280,3 +280,23 @@ where
     use serde::Deserialize;
     Ok(Option::<T>::deserialize(d)?.unwrap_or_default())
 }
+
+/// まだデコードしていないリクエストボディ（1MB まで）。権限の確認をデコードより先に行うハンドラーで使う。
+pub struct RawBody(pub axum::body::Bytes);
+
+impl<S: Send + Sync> FromRequest<S> for RawBody {
+    type Rejection = AppError;
+
+    async fn from_request(req: Request, _: &S) -> Result<Self, Self::Rejection> {
+        axum::body::to_bytes(req.into_body(), MAX_BODY_BYTES)
+            .await
+            .map(RawBody)
+            .map_err(|_| too_large("リクエストが大きすぎます"))
+    }
+}
+
+impl RawBody {
+    pub fn decode<T: DeserializeOwned + Default>(&self) -> Result<T, AppError> {
+        decode_json(&self.0)
+    }
+}

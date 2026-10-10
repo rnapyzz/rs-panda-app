@@ -49,6 +49,24 @@ pub fn from_unix(secs: i64) -> NaiveDateTime {
     chrono::DateTime::from_timestamp(secs, 0).unwrap_or_default().with_timezone(&offset()).naive_local()
 }
 
+/// 日付を YYYY-MM-DD で書き出す（serde の serialize_with 用）。
+pub fn ser_date<S: Serializer>(d: &NaiveDate, s: S) -> Result<S::Ok, S::Error> {
+    s.serialize_str(&d.format("%Y-%m-%d").to_string())
+}
+
+/// Option の日付（None は null）。
+pub fn ser_date_opt<S: Serializer>(d: &Option<NaiveDate>, s: S) -> Result<S::Ok, S::Error> {
+    match d {
+        Some(d) => s.serialize_str(&d.format("%Y-%m-%d").to_string()),
+        None => s.serialize_none(),
+    }
+}
+
+/// YYYY-MM-DD の日付を読む。
+pub fn parse_date(s: &str) -> Option<NaiveDate> {
+    NaiveDate::parse_from_str(s, "%Y-%m-%d").ok().filter(|_| s.len() == 10)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
