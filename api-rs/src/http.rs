@@ -84,6 +84,10 @@ pub fn decode_json<T: DeserializeOwned + Default>(bytes: &[u8]) -> Result<T, App
             bad_request(format!("リクエストの JSON が不正です: {e}"))
         }
     })?;
+    // 本文が null なら既定値（Go の encoding/json は null を「値を変えない」として扱う）
+    if v.is_null() {
+        return Ok(T::default());
+    }
     strip_nulls(&mut v);
     serde_json::from_value(v).map_err(|e| bad_request(format!("リクエストの JSON が不正です: {e}")))
 }

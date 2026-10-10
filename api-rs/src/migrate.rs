@@ -35,13 +35,14 @@ pub fn pending(all: &[Migration], applied: &HashSet<String>) -> Vec<Migration> {
 /// 未適用のマイグレーションをすべて適用する。
 /// 複数プロセスから同時に実行されないよう、MySQL の名前付きロックを取得する（ロックはセッション単位なので同じコネクションで処理する）。
 pub async fn up(conn: &mut Conn) -> anyhow::Result<usize> {
+    // ロックは同じデータベースへのマイグレーションだけを直列にする（別のデータベースは同時に適用できる）
     let locked: Option<Option<i64>> =
-        conn.exec_first("SELECT GET_LOCK(?, 30)", (LOCK_NAME,)).await.context("get lock")?;
+        conn.exec_first("SELECT GET_LOCK(CONCAT(?, ':', DATABASE()), 30)", (LOCK_NAME,)).await.context("get lock")?;
     if locked.flatten() != Some(1) {
         bail!("get lock: timed out");
     }
     let result = up_locked(conn).await;
-    let _ = conn.exec_drop("SELECT RELEASE_LOCK(?)", (LOCK_NAME,)).await;
+    let _ = conn.exec_drop("SELECT RELEASE_LOCK(CONCAT(?, ':', DATABASE()))", (LOCK_NAME,)).await;
     result
 }
 
