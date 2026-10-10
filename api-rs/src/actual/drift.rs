@@ -1,14 +1,19 @@
-//! ロック済みのシナリオの実績と、今の実績の食い違い（docs/plan.md「2.14」）。
+//! ロック済みのシナリオの実績と、今の実績の食い違い（docs/plan.md「2.14」）と、実績を最新にする API。
 //! ロック済みのシナリオはロック時の実績（scenario_actuals）を固定しているので、後から会計側の修正を取り込むとずれる。
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
+use axum::extract::State;
+use axum::response::Response;
 use mysql_async::prelude::*;
 use num_bigint::BigInt;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
-use crate::AppResult;
-use crate::db::{Params, Value};
+use crate::auth::AdminUser;
+use crate::db::{self, Params, Value};
+use crate::error::{conflict, not_found, validation1};
+use crate::http::{self, Id, Json};
+use crate::{AppResult, AppState, audit, calc};
 
 /// 1か月の食い違い。差は「今の実績 − シナリオに保存した実績」（未割当を含む）。
 /// changed は施策 × 科目で金額が違う件数（施策の間の付け替えだけなら、収益・費用の差は 0 でも changed は 1 以上）。
@@ -114,6 +119,91 @@ pub async fn load_drift<Q: Queryable>(q: &mut Q, scenario_id: i64, months: &[Str
 /// 年度のロック済みのシナリオのうち、実績が今の実績と食い違うものの名前を返す（シナリオの切り替えの注意に使う）。
 pub async fn drifted_scenarios<Q: Queryable>(q: &mut Q, fiscal_year: i32) -> AppResult<Vec<String>> {
     Ok(load_drift(q, 0, &[]).await?.into_iter().filter(|d| d.fiscal_year == fiscal_year).map(|d| d.name).collect())
+}
+
+/// GET /api/scenarios/actual-drift。FP&A のみ。
+pub async fn list_drift(State(st): State<AppState>, _: AdminUser) -> AppResult<Response> {
+    let mut conn = st.db.get_conn().await?;
+    Ok(http::list(&load_drift(&mut conn, 0, &[]).await?))
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+pub struct RefreshRequest {
+    reason: String,
+    dry_run: bool,
+}
+
+#[derive(Serialize)]
+struct RefreshResult {
+    dry_run: bool,
+    drift: ScenarioDrift,
+    /// 入れ替えた後に保存した実績の件数
+    saved: u64,
+}
+
+/// 実績を入れ替えたことの監査ログ（行ごとの監査ログは actual_facts に残っている）。
+#[derive(Serialize)]
+struct RefreshRecord<'a> {
+    id: i64,
+    name: &'a str,
+    refreshed_actuals: u64,
+    actual_drift: &'a [DriftMonth],
+}
+
+/// POST /api/scenarios/{id}/refresh-actuals。FP&A のみ。
+/// ロック済みのシナリオに保存した決算確定月以前の実績（未割当を含む）を、今の実績に入れ替える。ロックは外れない。
+/// dry_run なら保存せず、月ごとの差だけを返す。
+pub async fn refresh_actuals(
+    State(st): State<AppState>,
+    AdminUser(u): AdminUser,
+    Id(id): Id,
+    Json(req): Json<RefreshRequest>,
+) -> AppResult<Response> {
+    if !req.dry_run && req.reason.trim().is_empty() {
+        return Err(validation1("reason", "実績を最新にするには変更理由の入力が必要です"));
+    }
+    let mut tx = db::begin(&st.db).await?;
+    let rec = audit::begin(&mut tx, u.id, Some(id), &req.reason).await?;
+    let row: Option<(String, i32, bool, Option<String>)> = tx
+        .exec_first(
+            "SELECT name, fiscal_year, is_locked, DATE_FORMAT(actual_through, '%Y-%m') FROM scenarios WHERE id = ? FOR UPDATE",
+            (id,),
+        )
+        .await?;
+    let Some((name, fy, locked, through)) = row else {
+        return Err(not_found("シナリオが見つかりません"));
+    };
+    let Some(through) = through.filter(|_| locked) else {
+        return Err(conflict("実績を最新にできるのは、決算確定月のあるロック済みのシナリオだけです"));
+    };
+    let Some(drift) = load_drift(&mut tx, id, &[]).await?.into_iter().next() else {
+        return Err(conflict(format!("「{name}」の実績は最新の実績と同じです")));
+    };
+    let mut result = RefreshResult { dry_run: req.dry_run, drift, saved: 0 };
+    if req.dry_run {
+        tx.rollback().await?;
+        return Ok(http::ok(&result));
+    }
+    tx.exec_drop("DELETE FROM scenario_actuals WHERE scenario_id = ?", (id,)).await?;
+    tx.exec_drop(
+        "INSERT INTO scenario_actuals (scenario_id, activity_id, subject_id, target_month, amount)
+         SELECT ?, activity_id, subject_id, target_month, amount FROM actual_facts
+         WHERE target_month BETWEEN ? AND ?",
+        (id, format!("{}-01", calc::fiscal_months(fy)[0]), format!("{through}-01")),
+    )
+    .await?;
+    result.saved = tx.affected_rows();
+    // 入れ替えた件数と月ごとの差を記録する
+    let after = audit::to_json(&RefreshRecord {
+        id,
+        name: &name,
+        refreshed_actuals: result.saved,
+        actual_drift: &result.drift.months,
+    })?;
+    rec.record(&mut tx, "scenarios", id, "update", None, Some(after)).await?;
+    tx.commit().await?;
+    Ok(http::ok(&result))
 }
 
 /// 行数・合計・行の内容のチェックサム。

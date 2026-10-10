@@ -32,6 +32,16 @@ pub struct Upload {
 
 /// multipart/form-data の file と reason を読み込む。本番の取込（dry run 以外）は理由が必須。
 pub async fn read_upload(q: &Query, mp: Result<Multipart, MultipartRejection>) -> AppResult<Upload> {
+    read_upload_with(q, mp, "ファイルは 20MB 以下にしてください", "変更理由を入力してください").await
+}
+
+/// read_upload と同じだが、大きすぎるときと理由がないときのメッセージを指定する（上限はルートの DefaultBodyLimit）。
+pub async fn read_upload_with(
+    q: &Query,
+    mp: Result<Multipart, MultipartRejection>,
+    too_large_msg: &str,
+    reason_msg: &str,
+) -> AppResult<Upload> {
     let mut up = Upload { dry_run: q.get("dry_run") == "true", ..Default::default() };
     let form_error = || bad_request("multipart/form-data で file と reason を送ってください");
     let mut mp = mp.map_err(|_| form_error())?;
@@ -42,7 +52,7 @@ pub async fn read_upload(q: &Query, mp: Result<Multipart, MultipartRejection>) -
             Ok(Some(f)) => f,
             Ok(None) => break,
             Err(e) if e.status() == StatusCode::PAYLOAD_TOO_LARGE => {
-                return Err(too_large("ファイルは 20MB 以下にしてください"));
+                return Err(too_large(too_large_msg));
             }
             Err(_) => return Err(form_error()),
         };
@@ -51,7 +61,7 @@ pub async fn read_upload(q: &Query, mp: Result<Multipart, MultipartRejection>) -
         let bytes = match field.bytes().await {
             Ok(b) => b,
             Err(e) if e.status() == StatusCode::PAYLOAD_TOO_LARGE => {
-                return Err(too_large("ファイルは 20MB 以下にしてください"));
+                return Err(too_large(too_large_msg));
             }
             Err(_) => return Err(form_error()),
         };
@@ -63,7 +73,7 @@ pub async fn read_upload(q: &Query, mp: Result<Multipart, MultipartRejection>) -
     }
     up.reason = reason.unwrap_or_default().trim().to_string();
     if up.reason.is_empty() && !up.dry_run {
-        return Err(validation1("reason", "変更理由を入力してください"));
+        return Err(validation1("reason", reason_msg));
     }
     match file {
         Some(f) => up.data = f,
@@ -110,6 +120,30 @@ pub fn parse(data: &[u8], columns: &[&str]) -> AppResult<Vec<Row>> {
 
 /// parse と同じだが、optional の列はヘッダーになくてもよい（値は空として読む）。
 pub fn parse_with_optional(data: &[u8], columns: &[&str], optional: &[&str]) -> AppResult<Vec<Row>> {
+    parse_limited(data, columns, optional, MAX_ROWS)
+}
+
+/// parse_with_optional と同じだが、データ行の上限を指定する。
+pub fn parse_limited(data: &[u8], columns: &[&str], optional: &[&str], max_rows: usize) -> AppResult<Vec<Row>> {
+    let mut errs = RowErrors::default();
+    let rows = read_rows(data, columns, optional, max_rows, &mut errs, |_, _| {})?;
+    errs.check()?;
+    if rows.is_empty() {
+        return Err(bad_request("CSV にデータ行がありません"));
+    }
+    Ok(rows)
+}
+
+/// CSV を読み、ヘッダーを確かめて行を返す。行の形式のエラーは errs に集め、読めた行ごとに check を呼ぶ
+/// （値の検証のエラーも行の順に並ぶ）。ヘッダーのエラーだけは Err で返す。errs の確認と、行がないときの扱いは呼び出し側で行う。
+pub fn read_rows(
+    data: &[u8],
+    columns: &[&str],
+    optional: &[&str],
+    max_rows: usize,
+    errs: &mut RowErrors,
+    mut check: impl FnMut(&Row, &mut RowErrors),
+) -> AppResult<Vec<Row>> {
     let data = utf8_text(data)?;
     let mut r = reader(data);
     let mut records = r.records();
@@ -146,7 +180,6 @@ pub fn parse_with_optional(data: &[u8], columns: &[&str], optional: &[&str]) -> 
     let all: Vec<&str> = columns.iter().chain(optional.iter()).copied().collect();
 
     let mut rows = Vec::new();
-    let mut errs = RowErrors::default();
     for rec in records {
         let rec = match rec {
             Ok(r) => r,
@@ -165,19 +198,17 @@ pub fn parse_with_optional(data: &[u8], columns: &[&str], optional: &[&str]) -> 
             errs.add(line, format!("列の数が {} ではありません", header.len()));
             continue;
         }
-        if rows.len() >= MAX_ROWS {
-            errs.add(line, format!("データ行は {MAX_ROWS} 行までです"));
+        if rows.len() >= max_rows {
+            errs.add(line, format!("データ行は {max_rows} 行までです"));
             break;
         }
         let values = all
             .iter()
             .filter_map(|c| index.get(*c).map(|&i| (c.to_string(), rec.get(i).unwrap_or("").trim_start().to_string())))
             .collect();
-        rows.push(Row { line, values });
-    }
-    errs.check()?;
-    if rows.is_empty() {
-        return Err(bad_request("CSV にデータ行がありません"));
+        let row = Row { line, values };
+        check(&row, errs);
+        rows.push(row);
     }
     Ok(rows)
 }
