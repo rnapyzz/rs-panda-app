@@ -22,15 +22,17 @@ trap 'kill "${SERVER_PID:-0}" 2>/dev/null || true; rm -rf "$WORK"; if [ "${KEEP:
 mysql_exec() { docker compose exec -T db mysql -u"$DB_USER" -p"$DB_PASSWORD" -e "$1" 2>/dev/null; }
 
 cd api
+# 本番と同じく、最適化したビルドで測る
+cargo build --release --locked --bin server --bin createuser --bin perfseed
+BIN=target/release
 if [ "${SEED:-1}" = "1" ]; then
   mysql_exec "DROP DATABASE IF EXISTS \`$DB_NAME\`; CREATE DATABASE \`$DB_NAME\` CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci"
   echo "== データの作成"
-  go run ./cmd/perfseed
-  printf '%s\n' "$PASSWORD" | go run ./cmd/createuser -email "$EMAIL" -name "計測用 FP&A" -role fpa_admin >/dev/null
+  "$BIN/perfseed"
+  printf '%s\n' "$PASSWORD" | "$BIN/createuser" -email "$EMAIL" -name "計測用 FP&A" -role fpa_admin >/dev/null
 fi
 
-go build -o "$WORK/server" ./cmd/server
-"$WORK/server" >"$WORK/server.log" 2>&1 &
+"$BIN/server" >"$WORK/server.log" 2>&1 &
 SERVER_PID=$!
 for _ in $(seq 1 30); do curl -fs "$BASE/api/health" >/dev/null 2>&1 && break; sleep 1; done
 

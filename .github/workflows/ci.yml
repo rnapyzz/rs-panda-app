@@ -14,36 +14,7 @@ concurrency:
 
 jobs:
   api:
-    name: API (Go)
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: api
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
-        with:
-          go-version-file: api/go.mod
-          cache-dependency-path: api/go.sum
-      - name: gofmt
-        run: |
-          unformatted=$(gofmt -l .)
-          if [ -n "$unformatted" ]; then
-            echo "gofmt が必要なファイル:"
-            echo "$unformatted"
-            exit 1
-          fi
-      - name: go mod tidy
-        run: |
-          go mod tidy
-          git diff --exit-code -- go.mod go.sum
-      - name: go vet
-        run: go vet ./...
-      - name: go test
-        run: go test -race ./...
-
-  integration:
-    name: Migrations & integration tests (MySQL)
+    name: API (Rust)
     runs-on: ubuntu-latest
     services:
       mysql:
@@ -53,6 +24,7 @@ jobs:
           MYSQL_DATABASE: fpanda
           MYSQL_USER: fpanda
           MYSQL_PASSWORD: fpanda
+          TZ: Asia/Tokyo
         ports:
           - 3306:3306
         options: >-
@@ -61,6 +33,7 @@ jobs:
           --health-timeout=5s
           --health-retries=20
     env:
+      # マイグレーションはアプリと同じ（root ではない）ユーザーで適用する
       DB_HOST: 127.0.0.1
       DB_PORT: "3306"
       DB_USER: fpanda
@@ -76,66 +49,20 @@ jobs:
         working-directory: api
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
-        with:
-          go-version-file: api/go.mod
-          cache-dependency-path: api/go.sum
-      - name: migrate up
-        run: go run ./cmd/migrate up
-      - name: migrate up（再実行で変更がないこと）
-        run: go run ./cmd/migrate up 2>&1 | tee /tmp/migrate.log && grep -q "no pending migrations" /tmp/migrate.log
-      - name: migrate status
-        run: |
-          go run ./cmd/migrate status | tee /tmp/status.log
-          if grep -q "^pending" /tmp/status.log; then exit 1; fi
-      - name: 統合テスト（DB を使うテスト）
-        run: go test -race ./...
-
-  api-rs:
-    name: API (Rust)
-    runs-on: ubuntu-latest
-    services:
-      mysql:
-        image: mysql:8.4
-        env:
-          MYSQL_ROOT_PASSWORD: root
-          MYSQL_DATABASE: fpanda
-          TZ: Asia/Tokyo
-        ports:
-          - 3306:3306
-        options: >-
-          --health-cmd="mysqladmin ping -h 127.0.0.1 -uroot -proot --silent"
-          --health-interval=5s
-          --health-timeout=5s
-          --health-retries=20
-    env:
-      DB_HOST: 127.0.0.1
-      DB_PORT: "3306"
-      DB_USER: root
-      DB_PASSWORD: root
-      DB_NAME: fpanda
-      # 統合テストはテストごとに DB を作成するため root で接続する
-      TEST_DB_HOST: 127.0.0.1
-      TEST_DB_PORT: "3306"
-      TEST_DB_USER: root
-      TEST_DB_PASSWORD: root
-    defaults:
-      run:
-        working-directory: api-rs
-    steps:
-      - uses: actions/checkout@v7
-      # バージョンは api-rs/rust-toolchain.toml で決める（cargo が自動で入れる）
+      # バージョンは api/rust-toolchain.toml で決める（cargo が自動で入れる）
       - name: Rust のツールチェーン
         run: rustup show active-toolchain || rustup toolchain install
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: api-rs
+          workspaces: api
       - name: cargo fmt
         run: cargo fmt --check
       - name: cargo clippy
         run: cargo clippy --all-targets --locked -- -D warnings
       - name: migrate up
         run: cargo run --locked --bin migrate up
+      - name: migrate up（再実行で変更がないこと）
+        run: cargo run --locked --bin migrate up 2>&1 | tee /tmp/migrate.log && grep -q "no pending migrations" /tmp/migrate.log
       - name: migrate status
         run: |
           cargo run --locked --bin migrate status | tee /tmp/status.log
@@ -167,7 +94,7 @@ jobs:
   e2e:
     name: E2E (Docker Compose + Playwright)
     runs-on: ubuntu-latest
-    needs: [api, integration, web]
+    needs: [api, web]
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
