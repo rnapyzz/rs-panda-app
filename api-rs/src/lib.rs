@@ -18,10 +18,12 @@ pub mod jst;
 pub mod master;
 pub mod migrate;
 pub mod password;
+pub mod report;
 pub mod scenario;
 pub mod server;
 pub mod state;
 pub mod visibility;
+pub mod xlsx;
 
 pub use error::{AppError, AppResult};
 pub use state::AppState;

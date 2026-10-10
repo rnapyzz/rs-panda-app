@@ -7,6 +7,7 @@ use serde::Serialize;
 
 use crate::AppResult;
 use crate::db::{self, Tx, Value};
+use crate::error::not_found;
 
 /// 1つの変更セットに監査ログを記録する。
 #[derive(Clone, Copy, Debug)]
@@ -15,13 +16,19 @@ pub struct Recorder {
 }
 
 /// 変更セットを作成する。reason が空の場合は NULL で保存する。
-/// scenario_id はシナリオに紐づかない変更（マスタ変更など）では None。
+/// scenario_id はシナリオに紐づかない変更（マスタ変更など）では None。シナリオがなければ 404 にする
+/// （ハンドラーがシナリオを読む前に変更セットを作っても、外部キーのエラーで 500 にならないように）。
 pub async fn begin(tx: &mut Tx, user_id: i64, scenario_id: Option<i64>, reason: &str) -> AppResult<Recorder> {
-    tx.exec_drop(
-        "INSERT INTO change_sets (user_id, scenario_id, reason) VALUES (?, ?, ?)",
-        p![user_id, scenario_id, db::null_str(reason.trim())],
-    )
-    .await?;
+    let r = tx
+        .exec_drop(
+            "INSERT INTO change_sets (user_id, scenario_id, reason) VALUES (?, ?, ?)",
+            p![user_id, scenario_id, db::null_str(reason.trim())],
+        )
+        .await;
+    if scenario_id.is_some() && matches!(&r, Err(e) if db::err_no(e) == db::ERR_NO_REFERENCED_ROW) {
+        return Err(not_found("シナリオが見つかりません"));
+    }
+    r?;
     Ok(Recorder { change_set_id: db::last_id(tx) })
 }
 
