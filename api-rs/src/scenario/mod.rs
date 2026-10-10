@@ -24,7 +24,6 @@ use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post, put};
 use chrono::NaiveDateTime;
-use futures::future::BoxFuture;
 use mysql_async::prelude::*;
 use serde::{Deserialize, Serialize};
 
@@ -37,14 +36,6 @@ use crate::{AppResult, AppState, audit, calc, jst};
 
 pub use home::{AccuracyRow, accuracy_of, target_condition};
 pub use notes::mark_edited;
-
-/// 締切と通知（docs/plan.md「2.13」）の即時の通知。保存のトランザクションの後に呼ぶ。
-pub trait Notifier: Send + Sync {
-    /// 作成中・締切ありになったシナリオの「更新の開始」を送る（シナリオごとに1回）
-    fn update_started(&self, scenario_id: i64) -> BoxFuture<'_, ()>;
-    /// 決算確定月が進んだときに、前回見込との差が大きい施策の担当者に知らせる
-    fn actuals_reflected(&self, scenario_id: i64, months: Vec<String>, activity_ids: Vec<i64>) -> BoxFuture<'_, ()>;
-}
 
 /// ルート。
 pub fn routes() -> Router<AppState> {
@@ -436,7 +427,7 @@ pub fn validate_deadline(v: &mut Validator, s: &str) -> Value {
 
 /// 締切が入ったら「更新の開始」、決算確定月が進んだら「実績の反映」を送る（docs/plan.md「2.13」）。
 async fn notify_after_update(st: &AppState, before: &Scenario, after: &Scenario) {
-    let Some(notifier) = &st.notifier else { return };
+    let notifier = &st.notify;
     if !after.is_active || after.is_locked {
         return;
     }
@@ -519,8 +510,8 @@ async fn activate(
     };
     tx.commit().await?;
     // 締切が入っていれば「更新の開始」を送る（シナリオごとに1回）
-    if let (Some(n), Some(_)) = (&st.notifier, &updated.update_deadline) {
-        n.update_started(id).await;
+    if updated.update_deadline.is_some() {
+        st.notify.update_started(id).await;
     }
     Ok(http::ok(&updated))
 }

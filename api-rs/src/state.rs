@@ -16,8 +16,8 @@ pub struct Inner {
     pub trust_proxy: bool,
     /// SSO。None なら SSO は無効（パスワードでのログインだけ）
     pub oidc: Option<Oidc>,
-    /// 締切と通知。None なら通知しない
-    pub notifier: Option<std::sync::Arc<dyn crate::scenario::Notifier>>,
+    /// 締切と通知（docs/plan.md「2.13」）
+    pub notify: crate::notify::Service,
 }
 
 #[derive(Clone)]
