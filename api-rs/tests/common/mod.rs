@@ -81,7 +81,14 @@ impl TestEnv {
             auth.restrict_password_login(&[fpanda_api::auth::ROLE_FPA_ADMIN]);
             Oidc::new(cfg)
         });
-        let state = AppState::new(Inner { db: pool.clone(), auth, cookie_secure: false, trust_proxy: false, oidc });
+        let state = AppState::new(Inner {
+            db: pool.clone(),
+            auth,
+            cookie_secure: false,
+            trust_proxy: false,
+            oidc,
+            notifier: None,
+        });
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
@@ -360,4 +367,137 @@ pub fn activity_body(unit: i64, code: &str, overrides: Value) -> Value {
         }
     }
     b
+}
+
+/// 計算式で金額を算出する内訳を持つ施策（formula）と直接入力だけの施策（manual）を持つ（Go 版の scenarioFixture）。
+/// 実績の取込の API は第4段階で移すため、会計科目は作らない（実績は actual_fact で直接入れる）。
+pub struct ScenarioFixture {
+    pub f: ActivityFixture,
+    pub sales: i64,
+    pub cost: i64,
+    /// 施策（どちらも担当者は member）
+    pub formula_act: i64,
+    pub manual_act: i64,
+    /// formula_act のドライバー
+    pub price_id: i64,
+    pub volume_id: i64,
+    /// formula_act の売上の内訳（計算式で反映する）
+    pub sales_line: i64,
+    /// 2026年度のシナリオ（作成中）
+    pub budget: i64,
+}
+
+impl std::ops::Deref for ScenarioFixture {
+    type Target = ActivityFixture;
+    fn deref(&self) -> &ActivityFixture {
+        &self.f
+    }
+}
+
+impl ScenarioFixture {
+    pub async fn new() -> Option<ScenarioFixture> {
+        let f = ActivityFixture::new().await?;
+        let a = &f.admin;
+        let sales =
+            a.must_create("/api/subjects", json!({"code": "4110", "name": "受託売上", "category": "revenue"})).await;
+        let cost =
+            a.must_create("/api/subjects", json!({"code": "8110", "name": "外注費", "category": "expense"})).await;
+        let formula_act = a
+            .must_create(
+                "/api/activities",
+                activity_body(f.unit1, "SAAS-1", json!({"owner_user_id": f.member_id, "confidence_level": "C"})),
+            )
+            .await;
+        let base = format!("/api/activities/{formula_act}");
+        let price_id = a
+            .must_create(
+                &format!("{base}/drivers"),
+                json!({"code": "unit_price", "name": "単価", "driver_kind": "value"}),
+            )
+            .await;
+        let volume_id = a
+            .must_create(&format!("{base}/drivers"), json!({"code": "volume", "name": "件数", "driver_kind": "kpi"}))
+            .await;
+        let sales_line = a
+            .must_create(
+                &format!("{base}/lines"),
+                json!({"subject_id": sales, "name": "利用料", "expression": "unit_price * volume * 0.5", "formula_enabled": true, "reason": "算出式の設定"}),
+            )
+            .await;
+        let manual_act = a
+            .must_create("/api/activities", activity_body(f.unit1, "PRJ-1", json!({"owner_user_id": f.member_id})))
+            .await;
+        let budget = a
+            .must_create(
+                "/api/scenarios",
+                json!({"name": "2026年度 当初予算", "fiscal_year": 2026, "plan_role": "initial"}),
+            )
+            .await;
+        // 現場が入力できるのは作成中のシナリオだけ
+        let (status, body) = a.post(&format!("/api/scenarios/{budget}/activate"), Value::Null).await;
+        assert_eq!(status, StatusCode::OK, "作成中に指定: {body}");
+        Some(ScenarioFixture { f, sales, cost, formula_act, manual_act, price_id, volume_id, sales_line, budget })
+    }
+
+    pub fn values_path(&self, scenario_id: i64, activity_id: i64) -> String {
+        format!("/api/scenarios/{scenario_id}/activities/{activity_id}")
+    }
+
+    /// 実績を入れる（実績の取込の代わり。同じ施策・科目・月は置き換える）。
+    pub async fn actual_fact(&self, activity_id: i64, subject_id: i64, month: &str, amount: i64) {
+        self.env
+            .exec(
+                "INSERT INTO actual_facts (activity_id, subject_id, target_month, amount) VALUES (?, ?, ?, ?)
+                 ON DUPLICATE KEY UPDATE amount = VALUES(amount)",
+                (activity_id, subject_id, format!("{month}-01"), amount),
+            )
+            .await;
+    }
+}
+
+/// JSON の数値・文字列を文字列にする（数値は書かれたまま）。
+pub fn num_string(v: &Value) -> String {
+    match v {
+        Value::String(s) => s.clone(),
+        Value::Null => String::new(),
+        other => other.to_string(),
+    }
+}
+
+fn cell_of(values: &Value, month: &str) -> (String, Value) {
+    for c in values.as_array().into_iter().flatten() {
+        if c["target_month"] == month {
+            return (num_string(&c["amount"]), c.clone());
+        }
+    }
+    (String::new(), Value::Null)
+}
+
+/// レスポンスから科目・月の金額（科目への直接入力）を取り出す。無ければ ""。
+pub fn amount_of(body: &Value, subject_id: i64, month: &str) -> (String, Value) {
+    for r in body["amounts"].as_array().into_iter().flatten() {
+        if r["subject_id"] == json!(subject_id) {
+            return cell_of(&r["values"], month);
+        }
+    }
+    (String::new(), Value::Null)
+}
+
+/// 内訳の金額を返す。
+pub fn line_amount_of(body: &Value, line_id: i64, month: &str) -> (String, Value) {
+    for r in body["amounts"].as_array().into_iter().flatten() {
+        for l in r["lines"].as_array().into_iter().flatten() {
+            if l["id"] == json!(line_id) {
+                return cell_of(&l["values"], month);
+            }
+        }
+    }
+    (String::new(), Value::Null)
+}
+
+pub fn counts(body: &Value) -> String {
+    format!(
+        "inserted={} updated={} deleted={} unchanged={}",
+        body["inserted"], body["updated"], body["deleted"], body["unchanged"]
+    )
 }

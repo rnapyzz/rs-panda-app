@@ -37,6 +37,7 @@ async fn run() -> anyhow::Result<()> {
         cookie_secure: cfg.cookie_secure,
         trust_proxy: cfg.trust_proxy,
         oidc,
+        notifier: None,
     });
 
     tokio::spawn(cleanup_sessions(state.clone()));

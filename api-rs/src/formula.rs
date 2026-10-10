@@ -137,6 +137,37 @@ pub fn parse_decimal(s: &str) -> Option<Rat> {
     Some(if neg { -r } else { r })
 }
 
+/// 数値の文字列を有理数にする（Go の big.Rat.SetString と同じく、"1.5"・"1e3"・"-2.5E-1"・"1/3" を受け付ける）。
+pub fn parse_rat(s: &str) -> Option<Rat> {
+    if let Some((n, d)) = s.split_once('/') {
+        let n: BigInt = parse_int(n)?;
+        let d: BigInt = parse_int(d)?;
+        if d.is_zero() {
+            return None;
+        }
+        return Some(Rat::new(n, d));
+    }
+    let (mantissa, exp) = match s.find(['e', 'E']) {
+        Some(i) => (&s[..i], s[i + 1..].parse::<i32>().ok()?),
+        None => (s, 0),
+    };
+    if mantissa.trim() != mantissa {
+        return None;
+    }
+    let m = parse_decimal(mantissa)?;
+    let factor = Rat::from_integer(num_traits::pow(BigInt::from(10), exp.unsigned_abs() as usize));
+    Some(if exp >= 0 { m * factor } else { m / factor })
+}
+
+/// 符号付きの10進数の整数を読む（Go の big.Int.SetString(s, 10) と同じ）。
+pub fn parse_int(s: &str) -> Option<BigInt> {
+    let digits = s.strip_prefix(['+', '-']).unwrap_or(s);
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    s.strip_prefix('+').unwrap_or(s).parse().ok()
+}
+
 /// x を小数点以下 0 桁に四捨五入（0 から遠い方へ）した整数を返す。
 pub fn round_half_up(x: &Rat) -> BigInt {
     let num = x.numer().abs();
@@ -384,5 +415,12 @@ mod tests {
         assert_eq!(format_decimal(&rat("12.5"), 0), "13");
         assert_eq!(parse_decimal("1.0000"), Some(rat("1")));
         assert_eq!(parse_decimal("abc"), None);
+        assert_eq!(parse_rat("1.5e3"), Some(rat("1500")));
+        assert_eq!(parse_rat("-25E-2"), Some(rat("-0.25")));
+        assert_eq!(parse_rat("1/3"), Some(rat("1/3")));
+        assert_eq!(parse_rat("1/0"), None);
+        assert_eq!(parse_rat("x"), None);
+        assert_eq!(parse_int("+12").map(|v| v.to_string()), Some("12".into()));
+        assert_eq!(parse_int("1.0"), None);
     }
 }

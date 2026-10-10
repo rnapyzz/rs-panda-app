@@ -13,7 +13,7 @@ use futures::FutureExt;
 use mysql_async::prelude::*;
 
 use crate::error::{AppError, internal_error_response, not_found};
-use crate::{AppState, activity, auth, csvio, http, master};
+use crate::{AppState, activity, auth, csvio, http, master, scenario};
 
 /// API 全体のルーター。
 pub fn router(state: AppState) -> Router {
@@ -26,7 +26,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/auth/oidc/callback", get(auth::handler::oidc_callback))
         .route("/api/auth/me", get(auth::handler::me))
         .merge(master::routes())
-        .merge(activity::routes());
+        .merge(activity::routes())
+        .merge(scenario::routes());
 
     api
         // 未定義の /api パス（メソッドの違いを含む）は JSON で 404 を返す
