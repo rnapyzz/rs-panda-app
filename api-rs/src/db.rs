@@ -14,6 +14,8 @@ pub type Tx = mysql_async::Transaction<'static>;
 /// MySQL のエラー番号
 pub const ERR_DUPLICATE_ENTRY: u16 = 1062;
 pub const ERR_ROW_IS_REFERENCED: u16 = 1451;
+/// 参照先の行がない（外部キー）
+pub const ERR_NO_REFERENCED_ROW: u16 = 1452;
 
 /// 位置パラメーター。`p![a, b, c]`。
 #[macro_export]
@@ -45,9 +47,16 @@ macro_rules! from_row {
     };
 }
 
+/// 接続の文字コードと照合順序。Go 版（go-sql-driver の charset=utf8mb4）と同じく、MySQL 8 の既定の照合順序にする。
+/// ビュー（scenario_amounts など）の中の文字列リテラルは作ったときの接続の照合順序を持つので、
+/// Go 版が作った DB を Rust 版で読むとき（またはその逆）に、比較で照合順序が混ざらないようにそろえる。
+const SET_NAMES: &str = "SET NAMES utf8mb4 COLLATE utf8mb4_0900_ai_ci";
+
 /// 接続の設定。
 pub fn opts(c: &DbConfig, db_name: Option<&str>) -> Opts {
     OptsBuilder::default()
+        // 新しい接続と、プールに戻した接続のリセットのたびに実行する
+        .setup(vec![SET_NAMES])
         .ip_or_hostname(c.host.clone())
         .tcp_port(c.port)
         .user(Some(c.user.clone()))

@@ -248,6 +248,14 @@ impl Client {
         (status, res.json().await.unwrap_or(Value::Null))
     }
 
+    /// GET して、状態コード・ヘッダー・本文（バイト列）を返す。
+    pub async fn get_bytes(&self, path: &str) -> (StatusCode, reqwest::header::HeaderMap, Vec<u8>) {
+        let res = self.http.get(format!("{}{}", self.base, path)).send().await.unwrap();
+        let status = res.status();
+        let headers = res.headers().clone();
+        (status, headers, res.bytes().await.unwrap().to_vec())
+    }
+
     /// エクスポートの CSV を取得する（BOM を除いた本文を返す）。
     pub async fn download(&self, path: &str) -> String {
         let res = self.http.get(format!("{}{}", self.base, path)).send().await.unwrap();

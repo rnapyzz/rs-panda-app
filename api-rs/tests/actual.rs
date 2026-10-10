@@ -1,6 +1,5 @@
 //! 実績の取込・割当・締めの統合テスト。Go 版の actuals_test.go・entries_test.go・corrections_test.go と、
 //! external_code_test.go・visibility_test.go のうち実績の部分。
-//! 予実比較（レポート）で未割当を確かめる部分は、レポートを移す段階で足す。
 
 mod common;
 
@@ -162,6 +161,22 @@ async fn actual_allocation() {
     );
     assert_eq!(f.actual_amount(0, f.sales, "2026-04").await, "500", "未割当の売上");
     assert_eq!(f.actual_amount(pool, f.cost, "2026-04").await, "300", "受け皿の給与");
+
+    // 予実比較: 全社では未割当を unit_id: null の行で返す（会計の合計と一致させる）。決算確定月を 5月にした作成中のシナリオで確かめる
+    a.put(
+        &format!("/api/scenarios/{}", f.budget),
+        json!({"name": "2026年度 当初予算", "plan_role": "initial", "actual_through": "2026-05", "reason": "5月確定"}),
+    )
+    .await;
+    let report =
+        f.viewer.must_get(&format!("/api/reports/comparison?scenario_ids={}&include_actual=true", f.budget)).await;
+    let unallocated = report["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["unit_id"].is_null() && r["subject_id"] == json!(f.cost) && r["month"] == "2026-04")
+        .expect("未割当の行がない");
+    assert_eq!(unallocated["values"], json!({"s1": "70", "actual": "70"}), "予実比較の未割当（4月の費用）");
 
     // 未割当の一覧: 箱の ID ごと・会計科目 × 部門ごと
     let list = a.must_get("/api/actuals/unallocated?fiscal_year=2026").await;
@@ -449,6 +464,11 @@ async fn actual_corrections() {
     assert!(items(&a.must_get("/api/scenarios/actual-drift").await).is_empty());
     let (status, _) = a.post(&refresh, json!({"reason": "再"})).await;
     assert_eq!(status, StatusCode::CONFLICT, "食い違いがないのに最新にした");
+    // 存在しないシナリオは 404（Go 版は変更セットの外部キーのエラーで 500 になっていた）
+    for path in ["/api/scenarios/999999/refresh-actuals", "/api/scenarios/999999/lock"] {
+        let (status, body) = a.post(path, json!({"reason": "x"})).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{path}: {body}");
+    }
     // 監査ログには入れ替えた件数と月ごとの差が残る
     let after: String = f
         .env

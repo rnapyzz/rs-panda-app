@@ -35,7 +35,7 @@ use crate::error::{bad_request, conflict, not_found, validation1};
 use crate::http::{self, Id, Json, Query, Validator};
 use crate::{AppResult, AppState, audit, calc, jst};
 
-pub use home::{AccuracyRow, accuracy_of};
+pub use home::{AccuracyRow, accuracy_of, target_condition};
 pub use notes::mark_edited;
 
 /// 締切と通知（docs/plan.md「2.13」）の即時の通知。保存のトランザクションの後に呼ぶ。
