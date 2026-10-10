@@ -1,6 +1,5 @@
 //! シナリオ API の統合テスト。Go 版の scenario_test.go・cycle_test.go・comments_test.go・plan_values_test.go・target_test.go。
-//! 実績の取込は actual_fact（DB に直接）で代える。お知らせ・レポートの API を使う確認は、それらを移す段階で足す
-//! （お知らせは notifications の行で確かめる）。
+//! お知らせ・レポートの API を使う確認は、それらを移す段階で足す（お知らせは notifications の行で確かめる）。
 
 mod common;
 
@@ -593,8 +592,8 @@ async fn scenario_actual_through() {
             ]}),
         )
         .await;
-    f.actual_fact(f.manual_act, f.sales, "2026-04", 1000).await;
-    f.actual_fact(f.manual_act, f.sales, "2026-05", 900).await;
+    f.import_actual("2026-04", 1000).await;
+    f.import_actual("2026-05", 900).await;
 
     // 決算確定月の変更は理由が必須
     let (status, body) = f
@@ -633,7 +632,7 @@ async fn scenario_actual_through() {
     assert!(status == StatusCode::UNPROCESSABLE_ENTITY && !detail(&res, "values[0].target_month").is_empty(), "{res}");
 
     // ロックされていない間は実績を参照するので、取り込み直すと反映される
-    f.actual_fact(f.manual_act, f.sales, "2026-04", 1100).await;
+    f.import_actual("2026-04", 1100).await;
     assert_eq!(amount_of(&f.member.must_get(&vpath).await, f.sales, "2026-04").0, "1100");
     // ロックすると実績を保存して固定する。解除すると再び参照する
     let (_, locked) = f.admin.post(&format!("{path}/lock"), Value::Null).await;
@@ -643,7 +642,7 @@ async fn scenario_actual_through() {
         .query_one("SELECT CAST(after_json AS CHAR) FROM audit_logs WHERE table_name = 'scenarios' AND record_id = ? ORDER BY id DESC LIMIT 1", (f.budget,))
         .await;
     assert_eq!(serde_json::from_str::<Value>(&frozen).unwrap()["frozen_actuals"], json!(2));
-    f.actual_fact(f.manual_act, f.sales, "2026-04", 1200).await;
+    f.import_actual("2026-04", 1200).await;
     assert_eq!(amount_of(&f.member.must_get(&vpath).await, f.sales, "2026-04").0, "1100", "ロック後の4月（固定）");
     let (status, _) =
         f.admin.put(&path, json!({"name": "2026年度 当初予算", "actual_through": "2026-06", "reason": "r"})).await;
@@ -888,7 +887,7 @@ async fn activity_status() {
         .await;
     f.admin.post(&format!("/api/scenarios/{cur}/activate"), Value::Null).await;
     // 4月の実績 900 を入れ、今回の決算確定月を 4月にする
-    f.actual_fact(f.manual_act, f.sales, "2026-04", 900).await;
+    f.import_actual("2026-04", 900).await;
     f.admin
         .put(
             &format!("/api/scenarios/{cur}"),
@@ -999,7 +998,7 @@ async fn start_monthly() {
         )
         .await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    f.actual_fact(f.manual_act, f.sales, "2026-04", 900).await;
+    f.import_actual("2026-04", 900).await;
 
     let req = json!({"name": "2026年5月見込", "actual_through": "2026-05", "update_deadline": "2026-06-10"});
     // dry run: 変わる内容と注意（5月の実績が未取込、未完了の施策）を返し、何も変えない
@@ -1053,13 +1052,13 @@ async fn start_monthly() {
 async fn start_monthly_warns_drifted_actuals() {
     let Some(f) = ScenarioFixture::new().await else { return };
     let a = &f.admin;
-    f.actual_fact(f.manual_act, f.sales, "2026-04", 900).await;
+    f.import_actual("2026-04", 900).await;
     let (status, body) =
         a.post("/api/scenarios/start-monthly", json!({"name": "5月見込", "actual_through": "2026-05"})).await;
     assert_eq!(status, StatusCode::CREATED, "{body}");
     a.post("/api/scenarios/start-monthly", json!({"name": "6月見込", "actual_through": "2026-06"})).await;
     // ロック済みの「当初予算」「5月見込」に保存した4月の実績と、今の実績が食い違う（作成中の「6月見込」はまだロックしていない）
-    f.actual_fact(f.manual_act, f.sales, "2026-04", 950).await;
+    f.import_actual("2026-04", 950).await;
     let (_, body) = a
         .post("/api/scenarios/start-monthly", json!({"name": "7月見込", "actual_through": "2026-07", "dry_run": true}))
         .await;

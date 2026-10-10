@@ -370,11 +370,13 @@ pub fn activity_body(unit: i64, code: &str, overrides: Value) -> Value {
 }
 
 /// 計算式で金額を算出する内訳を持つ施策（formula）と直接入力だけの施策（manual）を持つ（Go 版の scenarioFixture）。
-/// 実績の取込の API は第4段階で移すため、会計科目は作らない（実績は actual_fact で直接入れる）。
 pub struct ScenarioFixture {
     pub f: ActivityFixture,
     pub sales: i64,
     pub cost: i64,
+    /// 実績の取込に使う会計科目（4110 → 受託売上、8110 → 外注費）
+    pub sales_account: i64,
+    pub cost_account: i64,
     /// 施策（どちらも担当者は member）
     pub formula_act: i64,
     pub manual_act: i64,
@@ -402,6 +404,10 @@ impl ScenarioFixture {
             a.must_create("/api/subjects", json!({"code": "4110", "name": "受託売上", "category": "revenue"})).await;
         let cost =
             a.must_create("/api/subjects", json!({"code": "8110", "name": "外注費", "category": "expense"})).await;
+        let sales_account =
+            a.must_create("/api/gl-accounts", json!({"code": "4110", "name": "受託売上", "subject_id": sales})).await;
+        let cost_account =
+            a.must_create("/api/gl-accounts", json!({"code": "8110", "name": "外注費", "subject_id": cost})).await;
         let formula_act = a
             .must_create(
                 "/api/activities",
@@ -436,22 +442,42 @@ impl ScenarioFixture {
         // 現場が入力できるのは作成中のシナリオだけ
         let (status, body) = a.post(&format!("/api/scenarios/{budget}/activate"), Value::Null).await;
         assert_eq!(status, StatusCode::OK, "作成中に指定: {body}");
-        Some(ScenarioFixture { f, sales, cost, formula_act, manual_act, price_id, volume_id, sales_line, budget })
+        Some(ScenarioFixture {
+            f,
+            sales,
+            cost,
+            sales_account,
+            cost_account,
+            formula_act,
+            manual_act,
+            price_id,
+            volume_id,
+            sales_line,
+            budget,
+        })
     }
 
     pub fn values_path(&self, scenario_id: i64, activity_id: i64) -> String {
         format!("/api/scenarios/{scenario_id}/activities/{activity_id}")
     }
 
-    /// 実績を入れる（実績の取込の代わり。同じ施策・科目・月は置き換える）。
-    pub async fn actual_fact(&self, activity_id: i64, subject_id: i64, month: &str, amount: i64) {
-        self.env
-            .exec(
-                "INSERT INTO actual_facts (activity_id, subject_id, target_month, amount) VALUES (?, ?, ?, ?)
-                 ON DUPLICATE KEY UPDATE amount = VALUES(amount)",
-                (activity_id, subject_id, format!("{month}-01"), amount),
+    /// 実績の金額を返す（なければ ""）。activity_id の 0 は未割当。
+    pub async fn actual_amount(&self, activity_id: i64, subject_id: i64, month: &str) -> String {
+        let rows: Vec<String> = self
+            .env
+            .query(
+                "SELECT CAST(amount AS CHAR) FROM actual_facts WHERE activity_key = ? AND subject_id = ? AND target_month = ?",
+                (activity_id, subject_id, format!("{month}-01")),
             )
             .await;
+        rows.into_iter().next().unwrap_or_default()
+    }
+
+    /// PRJ-1（manual_act）の受託売上の実績を、実績 CSV の取込で入れる（その月の明細はこの1行に置き換わる）。
+    pub async fn import_actual(&self, month: &str, amount: i64) {
+        let csv = format!("target_month,box_code,account_code,amount\n{month},PRJ-1,4110,{amount}\n");
+        let (status, body) = self.admin.upload("/api/actuals/import", &csv, &format!("{month} 実績取込")).await;
+        assert_eq!(status, StatusCode::OK, "実績の取込: {body}");
     }
 }
 

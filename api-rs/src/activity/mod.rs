@@ -30,6 +30,7 @@ use crate::error::{bad_request, conflict, forbidden, not_found, validation1};
 use crate::http::{self, Id, Json, Query, RawBody, Validator};
 use crate::{AppResult, AppState, audit, codes, jst, visibility};
 
+pub use external::EXTERNAL_CODE_PATTERN;
 pub use lines::Line;
 
 /// ルート。権限は各ハンドラーの中で施策・ユニットごとに判定する。
