@@ -1,9 +1,10 @@
-// migrations/*.sql をバイナリに埋め込む（Go 版の embed と同じ）。
+// migrations/*.sql をバイナリに埋め込む。
 // ファイル名から拡張子を除いたものをバージョンとし、名前の順に並べる。
 use std::{env, fs, path::Path};
 
 fn main() {
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations");
+    // パスはビルドスクリプトの実行時に読む（コンパイル時に埋め込むと、ディレクトリを移したときに古いパスを見る）
+    let dir = Path::new(&env::var("CARGO_MANIFEST_DIR").unwrap()).join("migrations");
     println!("cargo:rerun-if-changed={}", dir.display());
 
     let mut names: Vec<String> = fs::read_dir(&dir)

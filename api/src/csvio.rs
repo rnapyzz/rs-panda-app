@@ -180,16 +180,17 @@ pub fn read_rows(
     let all: Vec<&str> = columns.iter().chain(optional.iter()).copied().collect();
 
     let mut rows = Vec::new();
+    let mut lines = LineCounter::new(data);
     for rec in records {
         let rec = match rec {
             Ok(r) => r,
             Err(e) => {
-                let line = e.position().map(|p| line_at(data, p.byte() as usize)).unwrap_or(0);
+                let line = e.position().map(|p| lines.at(p.byte() as usize)).unwrap_or(0);
                 errs.add(line, format!("CSV の形式が正しくありません: {e}"));
                 break;
             }
         };
-        let line = rec.position().map(|p| line_at(data, p.byte() as usize)).unwrap_or(0);
+        let line = rec.position().map(|p| lines.at(p.byte() as usize)).unwrap_or(0);
         // 空行は読み飛ばす（Go の encoding/csv と同じ）
         if rec.len() == 1 && rec.get(0) == Some("") {
             continue;
@@ -214,12 +215,34 @@ pub fn read_rows(
 }
 
 /// 記録の始まりのバイト位置から、1始まりの行番号を求める（csv crate の行番号は CRLF や空行でずれるため）。
-fn line_at(data: &[u8], byte: usize) -> usize {
-    let mut start = byte.min(data.len());
-    while start < data.len() && (data[start] == b'\r' || data[start] == b'\n') {
-        start += 1;
+/// 記録は前から順に読むので、前回の位置から数え足す（毎回ファイルの先頭から数えると、行数の2乗の時間がかかる）。
+struct LineCounter<'a> {
+    data: &'a [u8],
+    /// ここまでの改行を数えたバイト位置と、その位置の行番号
+    pos: usize,
+    line: usize,
+}
+
+impl<'a> LineCounter<'a> {
+    fn new(data: &'a [u8]) -> Self {
+        LineCounter { data, pos: 0, line: 1 }
     }
-    1 + data[..start].iter().filter(|&&b| b == b'\n').count()
+
+    fn at(&mut self, byte: usize) -> usize {
+        let data = self.data;
+        let mut start = byte.min(data.len());
+        while start < data.len() && (data[start] == b'\r' || data[start] == b'\n') {
+            start += 1;
+        }
+        if start < self.pos {
+            // 前に戻ることはないが、念のため先頭から数え直す
+            self.pos = 0;
+            self.line = 1;
+        }
+        self.line += data[self.pos..start].iter().filter(|&&b| b == b'\n').count();
+        self.pos = start;
+        self.line
+    }
 }
 
 /// 行ごとのエラーを上限まで集める。

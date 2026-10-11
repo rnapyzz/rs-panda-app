@@ -14,7 +14,7 @@
 
 ## 技術スタック
 
-nginx + React.js + TailwindCSS + Go + MySQL 8。すべて Docker コンテナで動かす。
+nginx + React.js + TailwindCSS + Rust（axum）+ MySQL 8。すべて Docker コンテナで動かす。
 
 ## 用語（画面とコードの対応）
 
@@ -33,7 +33,7 @@ nginx + React.js + TailwindCSS + Go + MySQL 8。すべて Docker コンテナで
 
 - 起動: `make up`（http://localhost:8080）／停止: `make down`
 - マイグレーション: `make migrate`、`make migrate-status`、DB 作り直し: `make reset-db`
-- テスト: `make test`（Go のテスト、フロントの lint・ビルド・単体テスト）、E2E: `make e2e`（専用スタックで Playwright）、速さの計測: `make perf`、研修・試用の環境: `make demo`（本番に近い量のデータ。集計の仕組みを変えたら測り直す）、開発環境をデモのデータで作り直す: `make dev-demo`（開発環境のデータはすべて消える）
+- テスト: `make test`（API の fmt・clippy・テスト、フロントの lint・ビルド・単体テスト）、E2E: `make e2e`（専用スタックで Playwright）、速さの計測: `make perf`、研修・試用の環境: `make demo`（本番に近い量のデータ。集計の仕組みを変えたら測り直す）、開発環境をデモのデータで作り直す: `make dev-demo`（開発環境のデータはすべて消える）
 - 画面の変更では、利用者向けの手引き（`web/src/manual/`。docs/plan.md「2.21」）も同じ PR で更新する。手引きの画像に写る画面を変えたら `make manual-screenshots` で撮り直す
 - 画面の変更では、関係する E2E（`web/e2e/`）も更新する。E2E のデータは実行ごとに一意な名前で作る（`uniq()`）
 - マイグレーションは `api/migrations/` に `<4桁の連番>_<説明>.sql` で追加し、適用済みファイルは変更しない
@@ -44,8 +44,9 @@ nginx + React.js + TailwindCSS + Go + MySQL 8。すべて Docker コンテナで
 
 ## 開発方針
 
-- **標準パッケージ・標準ライブラリを優先する。** Go は `net/http`・`database/sql`・`encoding/json`・`log/slog` を使う。外部依存は MySQL ドライバー（`go-sql-driver/mysql`）以外は原則追加しない。追加が必要なときは理由を示して確認をとる。
-- 金額・ドライバー値は `DECIMAL` で扱い、浮動小数点で計算しない。
+- **依存は定番の crate に限り、最小限にする。** API は `tokio`・`axum`・`mysql_async`・`serde`・`tracing` などを使う（一覧は `api/Cargo.toml`、方針は docs/architecture.md）。新しい crate の追加が必要なときは理由を示して確認をとる。OIDC と Excel の書き出しはライブラリを使わずに実装している。
+- API の変更では `cargo fmt`・`cargo clippy --all-targets -- -D warnings`・`cargo test` を通す。Rust のバージョンは `api/rust-toolchain.toml` で固定している。
+- 金額・ドライバー値は `DECIMAL` で扱い、浮動小数点で計算しない（API では整数・有理数で計算する）。
 - 年月（`target_month`）は月初日の `DATE` で保持する。
 - 画面・図・Excel の金額のマイナスは「▲1,000」で表示する（`web/src/lib/format.ts` の `formatYen`・`formatSignedYen` を使う）。CSV は「-」のまま。
 - 確認・報告の画面の金額は、画面ごとの「金額の単位」（百万円が既定・千円・円）で表示する。`AmountUnitSwitch` と `AmountUnitProvider` を置き、部品は `useAmountUnit()` の `fmt`・`signed` を使う。数値の入力・明細・変更履歴は円のまま（docs/plan.md「7. 前提・決定事項」）。

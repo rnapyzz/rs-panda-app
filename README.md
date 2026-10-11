@@ -1,6 +1,6 @@
 # F-Panda
 
-[![CI](https://github.com/rnapyzz/f-panda-app/actions/workflows/ci.yml/badge.svg)](https://github.com/rnapyzz/f-panda-app/actions/workflows/ci.yml)
+[![CI](https://github.com/rnapyzz/rs-panda-app/actions/workflows/ci.yml/badge.svg)](https://github.com/rnapyzz/rs-panda-app/actions/workflows/ci.yml)
 
 活動（施策）ベースの予実管理・ローリングフォアキャスト支援アプリ。
 
@@ -8,7 +8,7 @@
 
 | ディレクトリ | 内容                                        |
 | ------------ | ------------------------------------------- |
-| `api/`       | Go の API サーバーとマイグレーション        |
+| `api/`       | Rust の API サーバーとマイグレーション      |
 | `web/`       | React + TailwindCSS（Vite）                 |
 | `nginx/`     | リバースプロキシ設定                        |
 
@@ -26,6 +26,8 @@ make up                # docker compose up --build -d
 - MySQL: `localhost:3307`（ユーザー / パスワード: `fpanda` / `fpanda`）
 
 起動時に `migrate` コンテナが未適用のマイグレーションを自動で適用する。
+
+API をコンテナの外で動かす・テストするには、Rust（`api/rust-toolchain.toml` のバージョン。`rustup` が自動で入れる）が必要。
 
 ### 最初のユーザーを作成する
 
@@ -60,8 +62,8 @@ make create-user EMAIL=admin@example.com NAME=管理者 ROLE=fpa_admin
 | `make migrate-status` | マイグレーションの適用状況を表示        |
 | `make reset-db`       | DB のデータを削除して作り直す           |
 | `make create-user`    | ユーザーを作成                          |
-| `make test`           | Go のテスト、フロントの lint・ビルド・単体テスト |
-| `make test-api`       | Go のテスト（DB を使うテストを含む）    |
+| `make test`           | API のテスト、フロントの lint・ビルド・単体テスト |
+| `make test-api`       | API の fmt・clippy・テスト（DB を使うテストを含む） |
 | `make test-web`       | フロントの lint・ビルド・単体テスト     |
 | `make e2e`            | E2E テスト（専用のスタックで実行）      |
 
@@ -75,8 +77,7 @@ GitHub Actions（`.github/workflows/ci.yml`）で、PR と main への push ご�
 
 | ジョブ       | 内容                                                                 |
 | ------------ | -------------------------------------------------------------------- |
-| `api`        | gofmt・`go mod tidy` の差分確認・`go vet`・`go test -race`           |
-| `integration` | MySQL 8.4 に対してマイグレーションを適用・再実行で変更がないこと、DB を使う統合テスト |
+| `api`        | `cargo fmt --check`・`cargo clippy`（警告はエラー）、MySQL 8.4 に対してマイグレーションを適用・再実行で変更がないこと、`cargo test`（単体・DB を使う統合テスト） |
 | `web`        | `npm run lint`・`npm run build`（型チェックを含む）・`npm test`      |
 | `e2e`        | 専用のスタックを起動し、Playwright で E2E テスト（失敗時はレポートを保存） |
 

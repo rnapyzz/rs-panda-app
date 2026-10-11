@@ -12,11 +12,11 @@ use chrono::{Duration, NaiveDate, NaiveDateTime};
 use mysql_async::prelude::*;
 use mysql_async::{Params, Pool};
 use num_bigint::BigInt;
-use num_traits::{Signed, Zero};
+use num_traits::Zero;
 use serde::{Serialize, Serializer};
 
 use super::measure::{HIGH_RATE, JOINS};
-use super::{parse_big, placeholders};
+use super::placeholders;
 use crate::auth::{CurrentUser, User};
 use crate::db::Value;
 use crate::error::{bad_request, validation1};
@@ -52,15 +52,25 @@ struct Pl {
     expense: String,
 }
 
-/// 収益と費用の合計（有理数。加重見込の端数を最後に丸める）。
+/// 合計の単位（1円の 1/10,000）。標準の確率は小数4桁（DECIMAL(5,4)）なので、加重見込もこの単位で割り切れ、
+/// 整数のまま誤差なく合計できる（有理数の足し算は1回ごとに約分するため、行数が多いと遅い）。
+const SCALE: i128 = 10_000;
+
+/// SCALE 単位の金額を、円未満を四捨五入（0 から遠い方へ）して円にする。
+fn round_scaled(x: i128) -> i128 {
+    let q = (x.abs() * 2 + SCALE) / (SCALE * 2);
+    if x < 0 { -q } else { q }
+}
+
+/// 収益と費用の合計（SCALE 単位。加重見込の端数を最後に丸める）。
 #[derive(Clone, Debug, Default)]
 struct PlSum {
-    revenue: Rat,
-    expense: Rat,
+    revenue: i128,
+    expense: i128,
 }
 
 impl PlSum {
-    fn add(&mut self, category: &str, v: &Rat) {
+    fn add(&mut self, category: &str, v: i128) {
         if category == "revenue" {
             self.revenue += v;
         } else {
@@ -68,12 +78,12 @@ impl PlSum {
         }
     }
 
-    fn profit(&self) -> Rat {
-        &self.revenue - &self.expense
+    fn profit(&self) -> i128 {
+        self.revenue - self.expense
     }
 
     fn pl(&self) -> Pl {
-        Pl { revenue: round_half_up(&self.revenue).to_string(), expense: round_half_up(&self.expense).to_string() }
+        Pl { revenue: round_scaled(self.revenue).to_string(), expense: round_scaled(self.expense).to_string() }
     }
 }
 
@@ -341,16 +351,15 @@ pub async fn risk(State(st): State<AppState>, CurrentUser(u): CurrentUser, q: Qu
         if let Some(ct) = &compare_totals {
             let c = ct.get(&r.id).unwrap_or(&empty);
             r.compare = Some(c.sums[WEIGHTED].pl());
-            r.warnings.downward = downward(&profit, &c.year[WEIGHTED].profit());
+            r.warnings.downward = downward(profit, c.year[WEIGHTED].profit());
             r.warnings.accuracy = accuracy.get(&r.id).cloned();
             r.warnings.postponed = postponed.get(&r.id).cloned().unwrap_or_default();
         }
         // 連続の下方修正: 今回 < 1つ前 < 2つ前
         if chain.len() == CONSECUTIVE_DEPTH - 1 {
-            let zero = Rat::zero();
-            let p1 = chain[0].get(&r.id).unwrap_or(&zero);
-            let p2 = chain[1].get(&r.id).unwrap_or(&zero);
-            r.warnings.consecutive = &profit < p1 && p1 < p2;
+            let p1 = chain[0].get(&r.id).copied().unwrap_or(0);
+            let p2 = chain[1].get(&r.id).copied().unwrap_or(0);
+            r.warnings.consecutive = profit < p1 && p1 < p2;
         }
         let w = &r.warnings;
         r.warning_count = usize::from(w.milestones.iter().any(|m| m.risk != "upcoming"))
@@ -445,14 +454,16 @@ struct AmountRow {
     category: String,
     kind: String,
     level: String,
-    rate: Rat,
+    /// 標準の確率（SCALE 倍した整数）
+    rate: i128,
     high: bool,
     outlook: String,
     month: String,
-    amount: BigInt,
+    /// 円
+    amount: i128,
 }
 
-type RawAmountRow = (i64, String, String, String, String, bool, String, String, String);
+type RawAmountRow = (i64, String, String, String, i64, bool, String, String, String);
 
 /// シナリオの金額を、内訳の段階・見通しの種類ごとに読む。
 async fn amount_rows(pool: &Pool, u: &User, scenario_id: i64) -> AppResult<Vec<AmountRow>> {
@@ -460,7 +471,7 @@ async fn amount_rows(pool: &Pool, u: &User, scenario_id: i64) -> AppResult<Vec<A
     let rows: Vec<RawAmountRow> = conn
         .exec(
             format!(
-                "SELECT b.activity_id, s.category, b.kind, cl.code, CAST(cl.rate AS CHAR), cl.rate >= {HIGH_RATE}, COALESCE(l.outlook, 'base'),
+                "SELECT b.activity_id, s.category, b.kind, cl.code, CAST(ROUND(cl.rate * {SCALE}) AS SIGNED), cl.rate >= {HIGH_RATE}, COALESCE(l.outlook, 'base'),
                         DATE_FORMAT(b.target_month, '%Y-%m'), CAST(SUM(b.amount) AS CHAR)
                  FROM scenario_amounts b JOIN subjects s ON s.id = b.subject_id{JOINS}
                  WHERE b.scenario_id = ?{}
@@ -477,11 +488,11 @@ async fn amount_rows(pool: &Pool, u: &User, scenario_id: i64) -> AppResult<Vec<A
                 category,
                 kind,
                 level,
-                rate: parse_decimal(&rate).ok_or_else(|| anyhow::anyhow!("invalid rate {rate:?}"))?,
+                rate: rate.into(),
                 high,
                 outlook,
                 month,
-                amount: parse_big(&amount)?,
+                amount: amount.parse().map_err(|_| anyhow::anyhow!("invalid amount {amount:?}"))?,
             })
         })
         .collect()
@@ -494,8 +505,9 @@ struct Totals {
     sums: [PlSum; 5],
     /// 指標ごとの年間の合計（シグナルに使う）
     year: [PlSum; 5],
-    by_level: BTreeMap<String, BigInt>,
-    by_month: BTreeMap<String, BTreeMap<String, BigInt>>,
+    /// 円
+    by_level: BTreeMap<String, i128>,
+    by_month: BTreeMap<String, BTreeMap<String, i128>>,
     /// 計画値に確度の高い段階の内訳がある
     high: bool,
 }
@@ -503,26 +515,23 @@ struct Totals {
 /// 金額の行を、施策ごとの指標（docs/plan.md「2.8」）に合計する。
 fn accumulate(rows: &[AmountRow], in_period: &HashSet<String>) -> HashMap<i64, Totals> {
     let mut out: HashMap<i64, Totals> = HashMap::new();
-    let zero = Rat::zero();
     for r in rows {
         let t = out.entry(r.activity_id).or_default();
-        let v = Rat::from_integer(r.amount.clone());
-        let weighted;
-        let mut values: [&Rat; 5] = [&v, &v, &v, &v, &zero];
+        let v = r.amount * SCALE;
+        let mut values: [i128; 5] = [v, v, v, v, 0];
         if r.kind == "actual" {
-            values[ACTUAL] = &v;
+            values[ACTUAL] = v;
         } else {
-            weighted = &v * &r.rate;
-            values[WEIGHTED] = &weighted;
+            values[WEIGHTED] = r.amount * r.rate;
             if r.outlook == "downside" {
-                values[OPTIMISTIC] = &zero;
+                values[OPTIMISTIC] = 0;
             } else if !r.high {
-                values[PESSIMISTIC] = &zero;
+                values[PESSIMISTIC] = 0;
             }
             t.high |= r.high;
         }
         let in_p = in_period.contains(&r.month);
-        for (i, x) in values.iter().enumerate() {
+        for (i, x) in values.into_iter().enumerate() {
             t.year[i].add(&r.category, x);
             if in_p {
                 t.sums[i].add(&r.category, x);
@@ -536,8 +545,8 @@ fn accumulate(rows: &[AmountRow], in_period: &HashSet<String>) -> HashMap<i64, T
             } else {
                 &r.level
             };
-            *t.by_level.entry(key.to_string()).or_default() += &r.amount;
-            *t.by_month.entry(r.month.clone()).or_default().entry(key.to_string()).or_default() += &r.amount;
+            *t.by_level.entry(key.to_string()).or_default() += r.amount;
+            *t.by_month.entry(r.month.clone()).or_default().entry(key.to_string()).or_default() += r.amount;
         }
     }
     out
@@ -614,27 +623,27 @@ fn direct_lines_last((mut lines, direct): (Vec<RiskLine>, BTreeMap<i64, String>)
     lines
 }
 
-/// 加重見込の利益が比較シナリオから 10% 以上かつ 10万円以上下がったら、その幅と率を返す。
-fn downward(cur: &Rat, cmp: &Rat) -> Option<Downward> {
+/// 加重見込の利益（SCALE 単位）が比較シナリオから 10% 以上かつ 10万円以上下がったら、その幅と率を返す。
+fn downward(cur: i128, cmp: i128) -> Option<Downward> {
     let diff = cur - cmp;
-    if !diff.is_negative() {
+    if diff >= 0 {
         return None;
     }
-    let drop = -&diff;
-    if drop < Rat::from_integer(DOWNWARD_MIN_YEN.into()) {
+    let drop = -diff;
+    if drop < i128::from(DOWNWARD_MIN_YEN) * SCALE {
         return None;
     }
     let base = cmp.abs();
-    let rate = if base.is_zero() {
+    let rate = if base == 0 {
         BigInt::from(1000)
     } else {
         // 10% 未満なら下方修正としない: drop × 100 < base × 10
-        if &drop * Rat::from_integer(100.into()) < &base * Rat::from_integer(DOWNWARD_RATE_PCT.into()) {
+        if drop * 100 < base * i128::from(DOWNWARD_RATE_PCT) {
             return None;
         }
-        rate_tenths(&drop, &base)
+        rate_tenths(&Rat::from_integer(drop.into()), &Rat::from_integer(base.into()))
     };
-    Some(Downward { diff: round_half_up(&diff).to_string(), rate })
+    Some(Downward { diff: round_scaled(diff).to_string(), rate })
 }
 
 /// 見込の当たり具合: 基準の決算確定済みの直近3か月（比較シナリオでは計画値の月）で、比較シナリオの計画値と実績の差の率が 20% 以上の施策。
@@ -708,7 +717,7 @@ async fn fetch_postponed(pool: &Pool, since: NaiveDateTime) -> AppResult<HashMap
 }
 
 /// 複製元をたどった直近の版（今回を除く、同じ年度）の、施策ごとの年間の加重見込の利益。版ごとの集計は並行して読む。
-async fn consecutive_chain(pool: &Pool, u: &User, s: &RiskScenario) -> AppResult<Vec<HashMap<i64, Rat>>> {
+async fn consecutive_chain(pool: &Pool, u: &User, s: &RiskScenario) -> AppResult<Vec<HashMap<i64, i128>>> {
     let mut prevs: Vec<i64> = Vec::new();
     let mut base = s.base_id;
     while prevs.len() < CONSECUTIVE_DEPTH - 1
@@ -786,19 +795,34 @@ mod tests {
         Rat::from_integer(n.into())
     }
 
+    /// 円を SCALE 単位にする。
+    fn yen(n: i64) -> i128 {
+        i128::from(n) * SCALE
+    }
+
     #[test]
     fn downward_thresholds() {
         // 1,000,000 → 500,000 は 50% の低下
-        let d = downward(&rat(500_000), &rat(1_000_000)).unwrap();
+        let d = downward(yen(500_000), yen(1_000_000)).unwrap();
         assert_eq!((d.diff.as_str(), d.rate.to_string().as_str()), ("-500000", "500"));
         // 10万円未満・10% 未満は下方修正としない
-        assert!(downward(&rat(950_000), &rat(1_000_000)).is_none());
-        assert!(downward(&rat(10_000_000 - 900_000), &rat(10_000_000)).is_none());
-        assert!(downward(&rat(2_000_000), &rat(1_000_000)).is_none());
+        assert!(downward(yen(950_000), yen(1_000_000)).is_none());
+        assert!(downward(yen(10_000_000 - 900_000), yen(10_000_000)).is_none());
+        assert!(downward(yen(2_000_000), yen(1_000_000)).is_none());
         // 比較の利益が 0 なら 100%
-        assert_eq!(downward(&rat(-200_000), &rat(0)).unwrap().rate, BigInt::from(1000));
+        assert_eq!(downward(yen(-200_000), yen(0)).unwrap().rate, BigInt::from(1000));
         // ちょうど 10%
-        assert!(downward(&rat(9_000_000), &rat(10_000_000)).is_some());
+        assert!(downward(yen(9_000_000), yen(10_000_000)).is_some());
+    }
+
+    #[test]
+    fn rounding() {
+        // 円未満は四捨五入（0 から遠い方へ）。加重見込の 0.5 円も誤差なく扱える
+        assert_eq!(round_scaled(12_345), 1);
+        assert_eq!(round_scaled(15_000), 2);
+        assert_eq!(round_scaled(-15_000), -2);
+        assert_eq!(round_scaled(14_999), 1);
+        assert_eq!(round_scaled(333 * 5_000), 167); // 333 円 × 0.5 = 166.5 円
     }
 
     #[test]
