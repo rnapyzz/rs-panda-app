@@ -48,8 +48,9 @@ perf: ## 本番に近い量のデータで、主な API の速さを測る（doc
 manual-screenshots: ## 手引きの画像（web/public/manual/）を、専用のスタックにデモのデータを入れて撮り直す
 	scripts/e2e.sh --config=playwright.screenshots.config.ts
 
-test-api: ## Go のテストを実行する（DB を使うテストは compose の db に接続する）
-	cd api && TEST_DB_HOST=127.0.0.1 TEST_DB_PORT=$${DB_PORT_HOST:-3307} TEST_DB_USER=root TEST_DB_PASSWORD=$${MYSQL_ROOT_PASSWORD:-root} go test ./...
+test-api: ## API のテスト（Rust の fmt・clippy・単体・統合テスト）を実行する（DB を使うテストは compose の db に接続する）
+	cd api && cargo fmt --check && cargo clippy --all-targets --locked -- -D warnings \
+	  && TEST_DB_HOST=127.0.0.1 TEST_DB_PORT=$${DB_PORT_HOST:-3307} TEST_DB_USER=root TEST_DB_PASSWORD=$${MYSQL_ROOT_PASSWORD:-root} cargo test --locked
 
 reset-db: ## DB のデータを削除して作り直す
 	docker compose down -v

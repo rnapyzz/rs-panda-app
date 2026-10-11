@@ -6,11 +6,11 @@
 | -------------- | -------------------------------------------------------------------- |
 | リバースプロキシ | nginx                                                                |
 | フロントエンド | React.js + TypeScript + TailwindCSS（Vite でビルド）                  |
-| バックエンド   | Go（標準パッケージ中心）                                              |
+| バックエンド   | Rust（tokio・axum・mysql_async などの定番の crate）                   |
 | データベース   | MySQL 8.4                                                            |
 | 実行環境       | Docker / Docker Compose                                              |
 
-基本方針: **できるだけ標準パッケージ・標準ライブラリで実装する。** 外部ライブラリの追加は必要最小限にとどめ、追加する場合は理由を残す。
+基本方針: **外部ライブラリは定番のものに限り、必要最小限にとどめる。** 追加する場合は理由を残す。OIDC と Excel の書き出しはライブラリを使わずに実装する。
 
 ## コンテナ構成
 
@@ -22,8 +22,8 @@
                 └───────────────┬──────────────┘
                                 │
                         ┌───────▼───────┐        ┌──────────┐
-                        │ api (Go)      │ ─────▶ │ db       │
-                        │ net/http      │        │ MySQL 8  │
+                        │ api (Rust)    │ ─────▶ │ db       │
+                        │ axum          │        │ MySQL 8  │
                         └───────────────┘        └──────────┘
 ```
 
@@ -31,35 +31,38 @@
 | -------- | -------------------------------------------------------------------------- |
 | `nginx`  | React のビルド成果物を配信し、`/api` を `api` コンテナに転送する            |
 | `web`    | React アプリ（開発時は Vite dev server）                            |
-| `api`    | Go の API サーバー                                                          |
+| `api`    | Rust の API サーバー（同じイメージに `migrate`・`createuser` も入れる）      |
 | `db`     | MySQL 8。データはボリュームに永続化する                                     |
 
-## バックエンド（Go）
+## バックエンド（Rust）
 
-- HTTP サーバー・ルーティング: `net/http` と `http.ServeMux`（Go 1.22 以降のメソッド・パスパターン）
-- DB アクセス: `database/sql` + `github.com/go-sql-driver/mysql`（唯一の必須外部依存）
-- JSON: `encoding/json`
-- ログ: `log/slog`
-- テスト: `testing`
-- 通知: Slack は Incoming Webhook に `net/http` で送る（SDK は使わない）。定期の送信は API のゴルーチンで行う（外部のスケジューラーは使わない）
-- マイグレーション: `api/migrations/<連番>_<説明>.sql` を `embed` で埋め込み、自前のランナー（`api/internal/migrate`）で適用する。適用済みバージョンは `schema_migrations` に記録する。compose の `migrate` サービスが起動時に適用する
-- 計算式の評価: ドライバー式（四則演算・括弧・数値・ドライバー code 参照）は自前の簡易パーサで評価する
+- 言語・ツールチェーン: Rust（edition 2024）。バージョンは `api/rust-toolchain.toml` で固定する（CI も同じ）
+- HTTP サーバー・ルーティング: `axum`（`tokio` の上で動く）。ログイン・権限の判定は抽出子（`CurrentUser`・`AdminUser`）で行う
+- DB アクセス: `mysql_async`（コネクションプール）。接続の照合順序は `utf8mb4_0900_ai_ci` にそろえる（ビューの中の文字列リテラルと比べても照合順序が混ざらないように）
+- JSON: `serde` / `serde_json`。未知の項目は受け付けない。数値は書かれた桁のまま扱う（`arbitrary_precision`）
+- 金額・ドライバー値: 浮動小数点を使わず、`num-bigint`・`num-rational` の整数・有理数で計算する
+- ログ: `tracing`（本番は JSON で標準出力へ）
+- テスト: `cargo test`（単体テストは各モジュール、DB を使う統合テストは `api/tests/`。テストごとに DB を作る）
+- 通知: Slack は Incoming Webhook に `reqwest` で送る（SDK は使わない）。定期の送信は API の中の tokio のタスクで行う（外部のスケジューラーは使わない）
+- マイグレーション: `api/migrations/<連番>_<説明>.sql` をビルド時に埋め込み（`build.rs`）、自前のランナー（`api/src/migrate.rs`）で適用する。適用済みバージョンは `schema_migrations` に記録する。compose の `migrate` サービスが起動時に適用する
+- 計算式の評価: ドライバー式（四則演算・括弧・数値・ドライバー code 参照）は自前の簡易パーサ（`api/src/formula.rs`）で評価する
+- コマンド: `server`（API）、`migrate`（`up` / `status`）、`createuser`（最初のユーザーの作成）、`perfseed`（速さの計測用のデータ）。`api/src/bin/` に置く
 
 ## 認証
 
 - 通常は **Google Workspace の SSO（OIDC）** でログインする。SSO を設定していない環境（開発環境など）は、メールアドレス＋パスワードでログインする
 - ログイン後はセッション Cookie（`fpanda_session`）で認証する（SSO・パスワードで共通）
-- パスワード: 標準ライブラリの PBKDF2-HMAC-SHA256（600,000回）でハッシュ化。12〜128文字
+- パスワード: PBKDF2-HMAC-SHA256（600,000回、`pbkdf2` crate）でハッシュ化。12〜128文字
 - セッション: ランダムな32バイトのトークンを Cookie で渡し、DB（`sessions`）には SHA-256 のみ保存する。有効期間は `SESSION_TTL`（デフォルト12時間）。期限切れは API サーバーが1時間ごとに削除する
 - Cookie: `HttpOnly`・`SameSite=Lax`。HTTPS 環境では `COOKIE_SECURE=true` で `Secure` を付ける
-- CSRF: Go 1.25 の `http.CrossOriginProtection` で、別オリジンからの更新系リクエストを拒否する
-- 権限: `auth.RequireAuth`（ログイン必須）と `auth.RequireRole(...)`（ロール制限）のミドルウェアで制御する。施策のようにデータごとに権限が変わるものはハンドラー内で判定する
+- CSRF: 別オリジンからの更新系リクエストを拒否するミドルウェア（`Sec-Fetch-Site`、なければ `Origin` と `Host` を比べる）
+- 権限: ハンドラーの抽出子 `CurrentUser`（ログイン必須、なければ 401）と `AdminUser`（FP&A のみ、ほかは 403）で制御する。施策のようにデータごとに権限が変わるものはハンドラー内で判定する
 - 無効化（`users.is_active = false`）したユーザーはログインできず、既存のセッションも使えなくなる
 - 最初の FP&A 管理者は `createuser` コマンドで作成する（`make create-user`、本番は ECS の単発のタスク）
 
 ### SSO（OIDC）
 
-- 認可コードフロー（PKCE・`state`・`nonce` 付き）。外部ライブラリは使わず、標準ライブラリ（`net/http`・`crypto/rsa`・`encoding/json`）で実装する
+- 認可コードフロー（PKCE・`state`・`nonce` 付き）。OIDC のライブラリは使わず、HTTP（`reqwest`）・RSA の署名の検証（`rsa`）・JSON（`serde_json`）で実装する
   1. `GET /api/auth/oidc/login`: `state`・`nonce`・PKCE の検証値を短命の Cookie（10分、`HttpOnly`・`Secure`）に入れ、IdP の認可エンドポイントへリダイレクトする
   2. `GET /api/auth/oidc/callback`: `state` を確かめ、トークンエンドポイントで認可コードを ID トークンに交換する
   3. ID トークン（JWT、RS256）を検証する: IdP の公開鍵（JWKS、`kid` で選ぶ。1時間キャッシュ）で署名、`iss`・`aud`・`exp`・`iat`・`nonce`、`email_verified`、ドメイン（`hd` またはメールアドレスのドメインが `OIDC_ALLOWED_DOMAINS` に含まれる）
@@ -93,7 +96,7 @@
             ECS Fargate のタスク（1台以上）
             ┌───────────────────────────────┐
             │ nginx（ビルドした画面、/api を転送）│
-            │ api（Go）                      │──▶ RDS for MySQL 8
+            │ api（Rust）                    │──▶ RDS for MySQL 8
             └───────────────────────────────┘
                  │ ログ                     秘密情報
                  ▼                          ▲
@@ -104,7 +107,7 @@
 | ---- | ---- |
 | イメージ | `web`（本番用のステージで画面をビルドし nginx に入れる）・`api`。ECR に置く |
 | マイグレーション | リリースの前に、`api` イメージの `migrate up` を ECS の単発のタスクとして実行する |
-| 自動の処理 | 通知・組織変更の予約は API 内のゴルーチンで動く。複数台でも DB の一意制約・行ロックで二重に動かない |
+| 自動の処理 | 通知・組織変更の予約は API 内の tokio のタスクで動く。複数台でも DB の一意制約・行ロックで二重に動かない |
 | 秘密情報 | `DB_PASSWORD`・`SLACK_WEBHOOK_URL`・`OIDC_CLIENT_SECRET` は Secrets Manager からタスクの環境変数に渡す |
 | 環境変数 | `COOKIE_SECURE=true`・`TRUST_PROXY=true`・`TZ=Asia/Tokyo`・`APP_BASE_URL`・OIDC の設定 |
 | ヘルスチェック | ALB のターゲットのヘルスチェックは `GET /api/health`（DB に接続できなければ 503） |
@@ -172,7 +175,7 @@
   - 確度: 確度の段階のコード（`confidence_level`、例: `C`）。日付は `YYYY-MM-DD`。プロジェクト型は開始日・終了日が必須
   - ドライバー code: 英小文字で始まる英小文字・数字・`_`、施策内で一意
   - マイルストーンのステータス: `not_started` / `in_progress` / `completed` / `delayed`
-- 計算式は `internal/formula` で解析・評価する（`math/big.Rat` による誤差のない計算、四捨五入は `RoundHalfUp`）。登録時に構文と、未定義のドライバーを使っていないかを検証する
+- 計算式は `api/src/formula.rs` で解析・評価する（有理数による誤差のない計算、四捨五入は `round_half_up`）。登録時に構文と、未定義のドライバーを使っていないかを検証する
 - 内訳の計算式（反映しない式を含む）で使われているドライバーは、code の変更・削除ができない。値が登録済みのドライバーも削除できない
 - 金額・ドライバー値・シナリオ条件がある施策は削除できない（409）。削除できる場合は、マイルストーン・ドライバー・内訳も合わせて削除し、それぞれ監査ログに残す
 
@@ -206,7 +209,7 @@
 - 金額は、決算確定月以前の月は実績（ロック済みなら `scenario_actuals`、それ以外は `actual_facts`）、それより後の月は計画値（`budget_facts`）。月ごとに実績かどうか（`actual_months`）を返す
 - 入力できるのは、ロックされていないシナリオの決算確定月より後の月で、作成中のシナリオは施策の編集権限、それ以外は FP&A のみ。それ以外は 409。入力の可否はレスポンスの `editable` で分かる
 - エイリアスを付けると、同じ年度で同じエイリアスを持つシナリオからは外れる
-- 金額の再計算は `internal/calc` が行い、変更した金額は同じ変更セットの監査ログに残す
+- 金額の再計算は `api/src/calc.rs` が行い、変更した金額は同じ変更セットの監査ログに残す
 
 ## シナリオの切り替え API
 
@@ -235,7 +238,7 @@
 
 - 変更（`items[]`）の種類: `move_activity`（`activity_id`・`target_unit_id`）、`move_unit`（`unit_id`・`segment_id`・`organization_id`）、`merge_unit`（`unit_id`・`target_unit_id`）、`change_owner`（`activity_id` または `unit_id` と `owner_user_id`、null で未設定）
 - 適用: 予約を作った FP&A の変更セットとして、1トランザクションで変更を順に適用する。検証はマスタ・施策の更新と同じ（末端ノード、廃止したユニット、無効なユーザーなど）。1つでもエラーなら全体をロールバックし、予約を失敗（`error` に理由）にして FP&A にお知らせを送る
-- 自動の適用: 通知と同じく API 内のゴルーチン（1分ごと）で、有効日が今日以前の予約中の予約を適用する（`internal/orgchange`）。予約の行ロックで二重の適用を防ぐ
+- 自動の適用: 通知と同じく API 内の tokio のタスク（1分ごと）で、有効日が今日以前の予約中の予約を適用する（`api/src/orgchange/`）。予約の行ロックで二重の適用を防ぐ
 - 予約の作成・変更のときに、今の状態で適用できるかを確かめる（適用してロールバックする）。適用できない予約は 422（`details.items` に何件目の変更か）
 - ユニットの廃止（`/archive`）は施策が所属していないときだけ。施策があるときは統合を使う
 
@@ -285,10 +288,10 @@
 | `GET /api/scenarios/{id}/reminders` | 今日（日本時間）催促した人（`user_ids`） | FP&A |
 
 - コメントのお知らせ（`comment`）は、投稿の API の中で宛先（担当者、いなければユニットのマネージャーと、そのやり取りにすでに書いた人）ごとに作る。Slack には送らず、送信の記録（`notification_runs`）にも残さない
-- 通知の組み立てと送信は `internal/notify`。宛先の決定（未完了の施策・担当者・マネージャー）はホームの更新の状態（`activity-status`）と同じ判定を使う
-- 定期の送信: API の起動時にゴルーチンを1つ起動し、1分ごとに送信時刻を過ぎたかを確かめる。送信の記録（`notification_runs`）の一意制約で、同じ通知を同じ日に二重に送らない（複数台・再起動でも安全）
+- 通知の組み立てと送信は `api/src/notify/`。宛先の決定（未完了の施策・担当者・マネージャー）はホームの更新の状態（`activity-status`）と同じ判定を使う
+- 定期の送信: API の起動時に tokio のタスクを1つ起動し、1分ごとに送信時刻を過ぎたかを確かめる。送信の記録（`notification_runs`）の一意制約で、同じ通知を同じ日に二重に送らない（複数台・再起動でも安全）
 - 即時の通知: 締切の設定（「更新の開始」）と決算確定月の変更（「実績の反映」）は、保存のトランザクションが終わった後に送る。送信の失敗は保存を失敗させない
-- Slack: 環境変数 `SLACK_WEBHOOK_URL`（Incoming Webhook）に `net/http` で JSON を POST する。本文のリンクには環境変数 `APP_BASE_URL`（アプリの URL。compose の既定は `http://localhost:8080`）を使う。未設定なら送らない。メンションは `<@メンバーID>`。タイムアウトは 10 秒。失敗は `notification_runs` に記録し、同じ日のうちに最大3回まで送り直す
+- Slack: 環境変数 `SLACK_WEBHOOK_URL`（Incoming Webhook）に `reqwest` で JSON を POST する。本文のリンクには環境変数 `APP_BASE_URL`（アプリの URL。compose の既定は `http://localhost:8080`）を使う。未設定なら送らない。メンションは `<@メンバーID>`。タイムアウトは 10 秒。失敗は `notification_runs` に記録し、同じ日のうちに最大3回まで送り直す
 - 時刻は日本時間（`Asia/Tokyo`）で判定する
 - FP&A のホームの「今月の作業」（docs/plan.md「2.20」）は、既存の API（`activity-status`・`actuals/months`・`actuals/unallocated`・`scenarios`・`scenarios/actual-drift`）から画面で組み立てる。集計用の API は追加しない
 
@@ -310,8 +313,8 @@
 `GET /api/reports/pack.xlsx`（ログインユーザー全員）
 
 - 条件は予実比較と同じ（`scenario_ids`・`include_actual`・`measure`）に、`grain`（`month` / `quarter` / `half` / `year`）、範囲（`segment_id` / `organization_id` / `unit_id`）、シート（`sheets=pl,units,notes`）、ユニット別 P/L に施策を含めるか（`activities=true`）を加える
-- 金額は予実比較と同じ集計（`internal/report` の読み込み）を使い、科目体系・組織の階層の合計、利益、差をサーバー側で計算する（`internal/report` の `pack.go`・`pack_sheets.go`。BigInt）。画面の集計（`web/src/lib/aggregate.ts`）と同じ結果になることをテストで確かめる
-- Excel は `internal/xlsx` が `archive/zip` で書く（Office Open XML の最小限: ワークブック・シート・スタイル。文字列はセルに直接入れる）。外部ライブラリは使わない。シート名に `/` は使えないため、「全社 P／L」のように全角にする
+- 金額は予実比較と同じ集計（`api/src/report/` の読み込み）を使い、科目体系・組織の階層の合計、利益、差をサーバー側で計算する（`api/src/report/` の `pack.rs`・`pack_sheets.rs`。整数）。画面の集計（`web/src/lib/aggregate.ts`）と同じ結果になることをテストで確かめる
+- Excel は `api/src/xlsx.rs` が書く（ZIP は `zip` crate、中の XML は Office Open XML の最小限: ワークブック・シート・スタイル。文字列はセルに直接入れる）。Excel のライブラリは使わない。シート名に `/` は使えないため、「全社 P／L」のように全角にする
 - レスポンスのファイル名は `filename*`（UTF-8）で `報告資料_<年度>_<日付>.xlsx`、`filename` は ASCII の `report_<年度>_<日付>.xlsx`
 - 閲覧制限のある科目は、予実比較と同じく見られる人にだけ含める
 - 図の画像（PNG）は画面で作る（`web/src/lib/domImage.ts`: 要素を複製して計算済みのスタイルを書き込み、SVG の foreignObject に入れて canvas に描く。`data-no-capture` の要素は除く）。API は使わない
@@ -319,7 +322,7 @@
 ## 閲覧制限のある科目（docs/plan.md「2.17」）
 
 - FP&A と経営陣・レビュアー以外（`manager`・`member`）には、`subjects.is_restricted` の科目の金額を返さない。合計・差異・利益なども、その科目を除いて計算する
-- 金額を返す API（数値入力、施策の P/L、予実比較、リスク、ホーム、計画値の CSV、実績の明細・未割当、変更履歴）は、ユーザーのロールから「見られる科目」の条件を作る共通処理（`internal/visibility`）を通して読む
+- 金額を返す API（数値入力、施策の P/L、予実比較、リスク、ホーム、計画値の CSV、実績の明細・未割当、変更履歴）は、ユーザーのロールから「見られる科目」の条件を作る共通処理（`api/src/visibility.rs`）を通して読む
 - 制限のある科目を除いたレスポンスには `restricted_hidden: true` を付け、画面は「閲覧制限のある科目を除いた金額です」と表示する
 - 制限のある科目の内訳の作成・金額の入力は FP&A のみ（それ以外は 403、計画値の CSV では行のエラー）
 
@@ -333,7 +336,7 @@
 - 形式と取込のルールは docs/plan.md「6.2」
 - 省略できる列（ユーザーの `slack_user_id`）は `csvio.ParseWithOptional` で読む
 - 取込の結果の `warnings` に注意を返す（ユーザーの取込では、担当している施策・所管ユニットが残っている無効なユーザー）
-- 共通処理（アップロードの読込、ヘッダーと行の検証、行エラー、結果、CSV の書き出し）は `internal/csvio`
+- 共通処理（アップロードの読込、ヘッダーと行の検証、行エラー、結果、CSV の書き出し）は `api/src/csvio.rs`
 - 結果: `{"dry_run", "rows", "inserted", "updated", "unchanged"}`。エラーは 422（`code: invalid_csv`、`error.rows` に行番号とメッセージ）
 
 ### 計画値の CSV（docs/plan.md「6.3」）
@@ -345,7 +348,7 @@
 | `POST /api/scenarios/{id}/plan-values/import` | 金額かドライバー値の CSV を取込（ヘッダーで判定。`multipart/form-data` の `file` と `reason`、`?dry_run=true` で確認のみ） | 数値の入力と同じ（施策ごとに判定） |
 
 - 取込の結果: `{"dry_run", "kind": "amounts"|"driver_values", "rows", "inserted", "updated", "deleted", "unchanged", "activities": [{"activity_id", "code", "name", "changed"}], "warnings": [{"kind": "actual_month"|"formula_line", "count"}]}`（件数はセルの数）
-- 値の書き込みは、数値入力 API（`PUT .../amounts`・`.../driver-values`）と同じ処理を使う（権限・入力できる月の判定、監査ログ、`internal/calc` の再計算、仮の値、更新の状態）
+- 値の書き込みは、数値入力 API（`PUT .../amounts`・`.../driver-values`）と同じ処理を使う（権限・入力できる月の判定、監査ログ、`api/src/calc.rs` の再計算、仮の値、更新の状態）
 
 ## リスク API
 
@@ -400,9 +403,10 @@
 ├── compose.yaml
 ├── nginx/
 │   └── default.conf
-├── api/                  # Go
-│   ├── cmd/server/       # エントリーポイント
-│   ├── internal/         # ドメイン・ハンドラー・リポジトリ
+├── api/                  # Rust
+│   ├── src/bin/          # コマンド（server・migrate・createuser・perfseed）
+│   ├── src/              # ドメイン・ハンドラー（機能ごとのモジュール）
+│   ├── tests/            # DB を使う統合テスト
 │   └── migrations/       # SQL マイグレーション
 ├── web/                  # React + TailwindCSS
 │   └── src/
